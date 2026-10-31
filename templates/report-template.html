@@ -804,6 +804,40 @@
         .hidden {
             display: none;
         }
+
+        /* Validity banner: what would make this report unreportable */
+        .validity-banner {
+            background: #fffbeb;
+            border: 1px solid #f59e0b;
+            border-left: 4px solid #f59e0b;
+            border-radius: 8px;
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .validity-banner h4 {
+            color: #92400e;
+            margin-bottom: 0.75rem;
+            font-size: 1rem;
+        }
+
+        .validity-banner ul {
+            margin: 0;
+            padding-left: 1.25rem;
+            color: #78350f;
+        }
+
+        .validity-banner li {
+            margin-bottom: 0.5rem;
+            line-height: 1.6;
+        }
+
+        .validity-banner code {
+            background: #fef3c7;
+            padding: 0.1rem 0.35rem;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
     </style>
 </head>
 <body>
@@ -830,11 +864,19 @@
                 <li class="navbar-item">
                     <a class="navbar-link" data-section="percentile">Performance Results</a>
                 </li>
+                <li class="navbar-item" id="nav-server" style="display:none">
+                    <a class="navbar-link" data-section="server">Server-side</a>
+                </li>
+                <li class="navbar-item">
+                    <a class="navbar-link" data-section="findings">Key Findings</a>
+                </li>
             </ul>
         </div>
     </nav>
 
     <div class="container">
+        __VALIDITY_BANNER__
+
         <!-- Architecture Section -->
         <section id="architecture" class="section">
             <h2 class="section-title">Architecture & Traffic Flow</h2>
@@ -876,12 +918,13 @@
                     <h4>Request Flow Details</h4>
                     <ul class="arch-steps">
                         <li>
-                            <strong>Fortio Load Generator</strong> generates HTTP requests at a fixed rate (500 QPS) with 16 concurrent connections.
+                            <strong>Fortio Load Generator</strong> generates HTTP requests at __TARGET_QPS__ with __CONNECTIONS__ concurrent connections,
+                            as set by the <code>__SCENARIO_NAME__</code> scenario.
                             Runs as a pod inside the cluster with direct access to the Gateway service.
                         </li>
                         <li>
                             <strong>Istio Gateway</strong> receives the request via Envoy proxy.
-                            The Gateway is managed by Istio using the <code>openshift-default</code> GatewayClass on OpenShift 4.22.18.
+                            The Gateway is managed by Istio on __PLATFORM__.
                         </li>
                         <li>
                             <strong>Coraza WAF WASM Plugin</strong> (optional, depending on test configuration) inspects the request.
@@ -905,7 +948,7 @@
                     <div class="meta-grid">
                         <div class="meta-item">
                             <div class="meta-label">Operator</div>
-                            <div class="meta-value">coraza-kubernetes-operator v0.5.0</div>
+                            <div class="meta-value">coraza-kubernetes-operator __OPERATOR_VERSION__</div>
                         </div>
                         <div class="meta-item">
                             <div class="meta-label">WAF Engine</div>
@@ -917,15 +960,19 @@
                         </div>
                         <div class="meta-item">
                             <div class="meta-label">Platform</div>
-                            <div class="meta-value">OpenShift 4.22.18</div>
+                            <div class="meta-value">__PLATFORM__</div>
                         </div>
                         <div class="meta-item">
                             <div class="meta-label">Service Mesh</div>
-                            <div class="meta-value">Istio v1.27.5</div>
+                            <div class="meta-value">Istio __ISTIO_VERSION__</div>
+                        </div>
+                        <div class="meta-item">
+                            <div class="meta-label">Load Generator</div>
+                            <div class="meta-value">__LOAD_GENERATOR__</div>
                         </div>
                         <div class="meta-item">
                             <div class="meta-label">Namespace</div>
-                            <div class="meta-value">waf-perf</div>
+                            <div class="meta-value">__NAMESPACE__</div>
                         </div>
                     </div>
                 </div>
@@ -1035,12 +1082,11 @@
             <div style="overflow-x: auto; margin-top: 1rem;">
                 <table id="heatmapTable" style="width: 100%; border-collapse: collapse;">
                     <thead>
-                        <tr style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                        <!-- Header cells are built from DATA.configs: they used to be
+                             four literals, so a report of other rulesets mislabelled
+                             its own columns. -->
+                        <tr id="heatmapHead" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
                             <th style="padding: 1rem; text-align: left; border: 1px solid #e5e7eb;">Load Profile</th>
-                            <th style="padding: 1rem; text-align: center; border: 1px solid #e5e7eb;">Off</th>
-                            <th style="padding: 1rem; text-align: center; border: 1px solid #e5e7eb;">Minimal</th>
-                            <th style="padding: 1rem; text-align: center; border: 1px solid #e5e7eb;">Medium</th>
-                            <th style="padding: 1rem; text-align: center; border: 1px solid #e5e7eb;">CRS</th>
                         </tr>
                     </thead>
                     <tbody id="heatmapBody">
@@ -1053,6 +1099,8 @@
             __PROFILE_TABLES__
         </section>
 
+        __SERVER_SECTION__
+
         <!-- Findings Section -->
         <section id="findings" class="section">
             <h2 class="section-title">Key Findings</h2>
@@ -1062,8 +1110,10 @@
 
         <!-- Footer -->
         <div class="footer">
-            <p>Generated on __GENERATED_DATE__ | __TEST_DURATION__</p>
-            <p>Coraza Kubernetes Operator __OPERATOR_VERSION__ • __PLATFORM__ • __ISTIO_VERSION__</p>
+            <p>Scenario <strong>__SCENARIO_NAME__</strong> — __RUN_SUMMARY__. Every figure is the median across a cell's repeats.</p>
+            <p>Generated on __GENERATED_DATE__ | __LOAD_GENERATOR__</p>
+            <p>Coraza Kubernetes Operator __OPERATOR_VERSION__ • __PLATFORM__ • Istio __ISTIO_VERSION__</p>
+            <p style="margin-top:0.5rem">WAF cost is the delta against the <code>waf-off</code> baseline of the same profile and session. Absolute latency is a property of this cluster and does not travel.</p>
         </div>
     </div>
 
@@ -1081,6 +1131,11 @@
     <script>
         // Data injected by generator
         const DATA = /*__DATA__*/null;
+
+        // The server-side section exists only when collect.sh was used.
+        if (document.getElementById('server')) {
+            document.getElementById('nav-server').style.display = '';
+        }
 
         // Navigation
         document.querySelectorAll('.navbar-link').forEach(link => {
@@ -1114,13 +1169,8 @@
                 return;
             }
 
-            const rulesetTitles = {
-                'off': 'OFF (No WAF)',
-                'minimal': 'Minimal Ruleset',
-                'medium': 'Medium Ruleset',
-                'crs': 'CRS (CoreRuleSet)'
-            };
-
+            // Titles come from the generator, which knows which rulesets ran.
+            const rulesetTitles = (DATA && DATA.rulesetTitles) || {};
             const title = rulesetTitles[rulesetId] || 'Ruleset';
             const content = DATA.rulesets[rulesetId];
             const modalContent = `<div class="code-block">${content}</div>`;
@@ -1194,10 +1244,23 @@
             const tbody = document.getElementById('heatmapBody');
             tbody.innerHTML = '';
 
+            // Columns are the rulesets this report actually covers.
+            const configs = (DATA && DATA.configs) || [];
+            const labels = (DATA && DATA.configLabels) || {};
+            const head = document.getElementById('heatmapHead');
+            configs.forEach(config => {
+                const th = document.createElement('th');
+                th.style.padding = '1rem';
+                th.style.textAlign = 'center';
+                th.style.border = '1px solid #e5e7eb';
+                th.textContent = labels[config] || config;
+                head.appendChild(th);
+            });
+
             // Find min/max for color scaling
             let allValues = [];
             data.forEach(row => {
-                ['off', 'minimal', 'medium', 'crs'].forEach(config => {
+                configs.forEach(config => {
                     if (row[config] !== null && row[config] !== undefined) {
                         allValues.push(row[config]);
                     }
@@ -1220,7 +1283,7 @@
                 tr.appendChild(profileTd);
 
                 // Config values
-                ['off', 'minimal', 'medium', 'crs'].forEach(config => {
+                configs.forEach(config => {
                     const td = document.createElement('td');
                     td.style.padding = '1rem';
                     td.style.textAlign = 'center';

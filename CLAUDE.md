@@ -44,7 +44,7 @@ scripts/setup.sh                      # provision namespace, backend, loadgen, G
 scripts/waf.sh on <minimal|medium|crs>  # or: off | status
 scripts/suite.sh <scenario-file> [rulesets...]   # canonical: baseline then one run per ruleset
 scripts/run.sh <scenario-file> [tag]  # one measured run with validity probes
-scripts/collect.sh <start> <end> [tag]  # pull Prometheus metrics for a window
+scripts/collect.sh <start> <end> [tag] [scenario]  # pull Prometheus metrics for a window
 scripts/teardown.sh                   # delete the namespace; results are kept
 scripts/prereqs/uninstall-operator.sh # also remove the operator, its RBAC and CRDs
 ```
@@ -52,12 +52,14 @@ scripts/prereqs/uninstall-operator.sh # also remove the operator, its RBAC and C
 Reporting needs no cluster:
 
 ```bash
-pip install -r requirements.txt
-python3 scripts/report.py --scenario <name>   # delta vs baseline, medians across repeats
-python3 generate-report.py                    # the full 3x4 matrix
+pip install -r requirements.txt               # PyYAML, for rule counts; optional
+python3 scripts/report.py                     # one page per scenario in results/
+python3 scripts/report.py --scenario fixed-500qps   # just that one
 ```
 
-`scripts/report.py` is the one to report from. It computes the delta against the baseline across repeats. Use `generate-report.py` for a matrix overview only.
+`scripts/report.py` is the only report generator. One page per scenario, covering every load profile measured under it as a profiles × rulesets matrix, every figure the median across that cell's repeats, every WAF cost a delta against that profile's own `waf-off` baseline. It discovers the scenario, the profiles and the rulesets from the filenames under `results/`, searched recursively, so it reports what ran rather than what was configured. Output is `results/<scenario>-report.html`; point `--results` at one run directory to report on that session alone.
+
+Rendering lives in `scripts/reportlib.py` and `templates/report-template.html`; `generate-report.py` is a shim that delegates, kept so older commands still work. Cluster facts the results cannot carry — `PLATFORM`, `ISTIO_VERSION`, `OPERATOR_VERSION`, `NAMESPACE` — are read from the environment and render as "not recorded" when unset.
 
 For a guided run, the bundled skill at `.claude/skills/perf-test/SKILL.md` carries the correct ordering and the delta analysis. It defers to this file where the two disagree.
 
@@ -96,14 +98,16 @@ no arguments; `scripts/prereqs/check.sh` reports what is missing;
 
 Carried over from the harness's previous home and deliberately not fixed, so the port stays faithful. [Known limitations](README.md#known-limitations) has the full list with line references.
 
-- **Every generated report claims the author's cluster.** `generate-report.py` and `templates/report-template.html` hardcode OpenShift 4.22.18, Istio v1.27.5, operator v0.5.0 and Fortio 1.76.0 as literals. Nothing reads them off the live cluster. Correct them by hand before circulating any report.
-- **The matrix is one repeat per cell.** `run-comprehensive-tests.sh` runs each combination once, which the methodology says is not reportable. Its output is indicative only.
-- **The load generator image is unpinned.** `LOADGEN_IMAGE` still defaults to `fortio/fortio:latest`, so runs weeks apart may not share a load generator. The manifest no longer carries a second copy of the tag — it reads the variable — so pinning it in one place is now enough.
-- **The scenario name is hardcoded twice.** `generate-report.py` and `analyze-results.py` each carry their own `fixed-500qps` glob.
+- **The matrix is one repeat per cell.** `run-comprehensive-tests.sh` runs each combination once, which the methodology says is not reportable. Its output is indicative only — the report now says so per cell, but the script still only runs one pass. Invoke it again, or `suite.sh` per profile, and regenerate: results accumulate and the medians widen.
+- **The load generator image is unpinned.** `LOADGEN_IMAGE` still defaults to `fortio/fortio:latest`, so runs weeks apart may not share a load generator. The manifest no longer carries a second copy of the tag — it reads the variable — so pinning it in one place is now enough. The report states the fortio version it finds in the results.
+- **`analyze-results.py` still carries its own `fixed-500qps` glob** and its own ruleset labels, so its text tables describe that scenario whatever you ran. The HTML report no longer does: it discovers scenario, profiles and rulesets from the filenames.
+
+Fixed here, and worth knowing if you compare against an older report: the HTML no longer hardcodes the author's cluster (OpenShift 4.22.18, Istio v1.27.5, operator v0.5.0, Fortio 1.76.0) — those are environment variables now, blank unless set — and it no longer takes the latest single run per cell.
 
 ## Conventions
 
 - Shell scripts are `set -euo pipefail` and source `lib.sh` for shared config. Every tunable is an environment variable with a default in `lib.sh`; add new ones there rather than inline.
 - Comments in these scripts frequently record why a past approach failed. Preserve them when editing.
-- `results/` is ignored. Fixture data for exercising the report generators lives in `testdata/sample-results/` and was measured on another cluster; no number in it is reportable here. Never copy it into `results/`: the per-scenario report medians every run it finds for a tag, so a fixture left there silently averages another cluster into the delta.
+- **Every run gets its own directory**: `results/<scenario>-DDMMYYHHMMSS/`, UTC, created by `suite.sh` (one per invocation) or `run-comprehensive-tests.sh` (one per matrix). `run.sh` honours `RUN_DIR` when set and opens its own when not; `collect.sh` writes its metrics into the same one. `lib.sh:new_run_dir` is the only place the name is built. Raw JSON, summaries, metrics and that run's own report live together, so a run archives or deletes as a unit and a same-session baseline is never separated from the runs it baselines. The reporter reads `results/` recursively, which is what keeps medians spanning repeats.
+- `results/` is ignored. Fixture data for exercising the report generator lives in `testdata/sample-results/` and was measured on another cluster; no number in it is reportable here. Never copy it into `results/`: the report medians every run it finds for a cell, so a fixture left there silently averages another cluster into the delta. To render it, point the generator at it instead — `scripts/report.py --results testdata/sample-results --out /tmp/x.html`.
 - Do not quote figures from `README.md` or any previous run. Regenerate the report and read the current data.

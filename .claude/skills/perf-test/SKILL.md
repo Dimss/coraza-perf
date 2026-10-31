@@ -49,40 +49,32 @@ Pick the mode from the user's request (or the `args`). Modes map to scripts:
 | `suite <scenario> [rulesets…]` | **Canonical run:** WAF-off (B0) then WAF-on per ruleset | `LOAD_PROFILE=… scripts/suite.sh <scenario-file> <rulesets…>` |
 | `run <scenario> <tag>` | One measured run with validity probes | `LOAD_PROFILE=… scripts/run.sh <scenario-file> <tag>` |
 | `waf on\|off\|status` | Toggle the WAF manually | `scripts/waf.sh on medium` |
-| `collect <start> <end> <tag>` | Pull Prometheus metrics for a window | `scripts/collect.sh <start> <end> <tag>` |
-| `analyze [scenario]` | Build the self-contained HTML report + WAF-cost delta from `results/` | `scripts/report.py [--scenario NAME]` (no cluster needed) |
-| `matrix` | **INDICATIVE ONLY** — 3 profiles × 4 rulesets at `fixed-500qps`, 12 runs, then the matrix report | `./run-comprehensive-tests.sh` |
-| `matrix-report` | **INDICATIVE ONLY** — rebuild the matrix HTML from `results/` | `python3 generate-report.py` (no cluster needed) |
+| `collect <start> <end> <tag>` | Pull Prometheus metrics for a window | `scripts/collect.sh <start> <end> <tag> <scenario>` |
+| `analyze [scenario]` | Build the HTML report — profiles × rulesets, medians, WAF-cost delta — from `results/` | `scripts/report.py [--scenario NAME]` (no cluster needed) |
+| `matrix` | **INDICATIVE ONLY** — 3 profiles × 4 rulesets at `fixed-500qps`, 12 runs, then the report | `./run-comprehensive-tests.sh` |
 | `matrix-text` | Percentile / throughput / consistency tables for the matrix, printed to stdout | `python3 analyze-results.py` (no cluster needed) |
 | `teardown` | Delete the test namespace (results kept) | `scripts/teardown.sh` |
 | `uninstall` | Also remove the operator, its RBAC and CRDs | `scripts/prereqs/uninstall-operator.sh` |
 | `crs` | Generate an OWASP CoreRuleSet ruleset for a run | see **Larger rulesets** below |
 
-### Why the matrix entry points are INDICATIVE ONLY
+### Why the matrix entry point is INDICATIVE ONLY
 
-`run-comprehensive-tests.sh`, `generate-report.py` and `analyze-results.py` are
-the fastest way to see all twelve cells at once, and their output is **not
-reportable**. Say so whenever you route a user to them. Both defects are
-recorded in README → *Known limitations*; neither is fixed:
+`run-comprehensive-tests.sh` is the fastest way to see all twelve cells at
+once, and its output is **not reportable**. Say so whenever you route a user to
+it. The defect is recorded in README → *Known limitations* and is not fixed:
 
-- **One repeat per cell.** `run-comprehensive-tests.sh` runs each combination
-  once (it says so in its own banner); the methodology below wants ≥3 and a
-  median with spread. `generate-report.py` and `analyze-results.py` both pick
-  the *latest* result per `(profile, ruleset)` cell, so they report a single
-  run, never a median.
-- **Every generated report claims the author's cluster.**
-  `generate-report.py` bakes `OpenShift 4.22.18`, Istio `v1.27.5`, operator
-  `v0.5.0`, `Fortio 1.76.0` and `500 req/s` in as literals (lines 1226–1230),
-  and `templates/report-template.html` repeats the operator version (line 908),
-  Istio (line 924) and the platform (lines 884, 920). Nothing reads those facts
-  off the cluster. Correct them by hand before circulating a number.
-- Both analysis scripts also hardcode the `fixed-500qps` scenario in their own
-  copy of `find_latest_result()`, so they silently find nothing for any other
-  scenario. `analyze-results.py` additionally hardcodes its ruleset labels
-  (it prints `minimal` as 2 rules; the manifest has 1).
+- **One repeat per cell.** It runs each combination once (it says so in its own
+  banner); the methodology below wants ≥3 and a median with spread. The report
+  now marks every thin cell — a run count under each matrix tick, a line in the
+  banner, a finding — but marking it is not fixing it. Run it again, or
+  `suite.sh` per profile, and regenerate: results accumulate in `results/` and
+  the medians widen.
+- **`analyze-results.py` is hardcoded to `fixed-500qps`** and to its own
+  ruleset labels (it prints `minimal` as 2 rules; the manifest has 1), so it
+  silently finds nothing for any other scenario.
 
 For anything you intend to report, use `suite.sh` ≥3× and `scripts/report.py`,
-which computes the delta vs B0 across repeats.
+which medians the repeats and computes the delta vs B0.
 
 ## Choosing what to run — the user must pick
 
@@ -317,22 +309,35 @@ regenerating — both explained in its header comment:
 
 ## Analyze — the self-contained HTML report + WAF-cost delta
 
-`scripts/report.py` is the primary analyzer. It reads `results/` (fortio `*.json`
-grouped by tag; `waf-off` = B0), takes the **median across repeats**, computes
-the delta vs B0 per percentile, folds in the server-side summary from any
-`metrics__*.jsonl` (`collect.sh`), and writes a **self-contained**
-`dashboard.html` — the durable per-run artifact. Needs **no cluster** and **no
-live Grafana/Prometheus** to view. `suite.sh` runs it automatically at the end
-of a suite, writing `results/<scenario>+<profile>.html`.
+Each run lands in its own `results/<scenario>-DDMMYYHHMMSS/` directory (UTC),
+with its raw JSON, summaries, any collected metrics and a report covering that
+session alone. `suite.sh` opens one per invocation, the matrix script one per
+matrix; set `RUN_DIR` to add runs to an existing directory.
+
+`scripts/report.py` is the only report generator. It reads `results/` recursively, discovers
+the scenario, load profiles and rulesets from the filenames, takes the **median
+across repeats** per `(profile, ruleset)` cell, computes the delta vs B0
+(`waf-off`) per percentile, folds in the server-side summary from that group's
+`metrics__<group>__<tag>__<ts>.jsonl` (`collect.sh`; files without a group in
+the name are skipped and reported), and writes one
+`results/<scenario>-report.html` per scenario — covering every profile measured
+under it. Needs **no cluster** and **no live Grafana/Prometheus**; the charts
+load Chart.js from a CDN. `suite.sh` runs it automatically at the end of a suite.
 
 ```bash
-scripts/report.py                 # single scenario in results/
-scripts/report.py --scenario fixed-500qps+args-light --out results/fixed-500qps+args-light.html
+scripts/report.py                 # every scenario, every run directory, one page each
+scripts/report.py --results results/fixed-500qps-311026102345   # one session
+scripts/report.py --scenario fixed-500qps
+PLATFORM="OpenShift 4.22.18" ISTIO_VERSION="v1.27.5" OPERATOR_VERSION="v0.5.0" \
+  scripts/report.py              # name the cluster; unset renders "not recorded"
 ```
 
-`generate-report.py` (matrix HTML) and `analyze-results.py` (matrix text tables)
-read the same `results/` directory but take the latest run per cell, not a
-median, and carry hardcoded cluster facts — **INDICATIVE ONLY**, see *Modes*.
+Read the banner at the top of the page first: it names any missing baseline,
+any cell that failed to hold its offered rate, and any cell resting on fewer
+than three runs. The same lines go to stdout.
+
+`analyze-results.py` (matrix text tables) reads the same directory but takes the
+latest run per cell, not a median — **INDICATIVE ONLY**, see *Modes*.
 
 Cross-run comparison (e.g. runs a week apart) is **report-to-report** against the
 committed baseline — not on a live dashboard. For a quick textual delta
@@ -386,6 +391,7 @@ To also gather metrics during a suite: `COLLECT=true scripts/suite.sh …`.
   is. Never headline an absolute number.
 - **Backend must never be the bottleneck** — it's an over-provisioned echo; if
   it saturates you're measuring the app, not the WAF.
-- **Never circulate a `generate-report.py` HTML unedited** — it asserts the
-  author's cluster (OpenShift/Istio/operator/Fortio versions) whatever you ran
-  against.
+- **Set `PLATFORM`, `ISTIO_VERSION` and `OPERATOR_VERSION` before generating a
+  report you intend to circulate** — nothing in `results/` records them, so
+  they render as "not recorded" otherwise. Never hand-edit them back in from
+  memory of another run.

@@ -1,7 +1,8 @@
-# Run output — raw fortio JSON, summaries, collected metrics.
+# Run output — one directory per run, holding raw fortio JSON, summaries,
+# collected metrics and that run's report. Regenerate with scripts/report.py.
 results/
 
-# Generated self-contained report (regenerate with scripts/report.py).
+# Report written outside results/ by `report.py --out`.
 dashboard.html
 
 # Python bytecode and tool caches.

@@ -15,6 +15,18 @@ PAYLOADS_CONFIGMAP="${PAYLOADS_CONFIGMAP:-perf-payloads}"
 SCENARIOS_DIR="${PT_ROOT}/scenarios"
 RESULTS_DIR="${RESULTS_DIR:-${PT_ROOT}/results}"
 
+# One sub-directory per perf-test run: results/<scenario>-DDMMYYHHMMSS. Raw
+# fortio JSON, summaries, collected metrics and that run's own report all land
+# together, so a run can be archived or deleted as a unit. The reporter reads
+# results/ recursively, so medians across repeats still span every run folder.
+#
+# suite.sh creates one and exports RUN_DIR; run.sh honours it, and makes its
+# own when invoked directly. Set RUN_DIR yourself to append to an existing one.
+new_run_dir() {
+  local scenario="${1:?new_run_dir <scenario-name>}"
+  printf '%s/%s-%s' "${RESULTS_DIR}" "${scenario}" "$(date -u +%d%m%y%H%M%S)"
+}
+
 # --- platform / cluster -----------------------------------------------------
 # Unset means "ask the cluster". PLATFORM decides both the CLI and the gateway
 # class, and defaulting it blindly to kubernetes on an OpenShift cluster aimed

@@ -54,6 +54,13 @@ read -r scenario_qps scenario_duration scenario_conns < <(
     source "${SCENARIO_FILE}"; echo "${QPS:-?} ${DURATION:-?} ${CONNS:-?}"
 )
 
+# One directory for the whole matrix, not one per profile: the twelve cells are
+# a single pass and belong together. Exported before the loop so each suite.sh
+# writes into it instead of opening its own (new_run_dir comes from lib.sh,
+# sourced above).
+export RUN_DIR="${RUN_DIR:-$(new_run_dir "${scenario_name}")}"
+mkdir -p "${RUN_DIR}"
+
 echo "═══════════════════════════════════════════════════════════════"
 echo "  COMPREHENSIVE PERFORMANCE TEST SUITE"
 echo "═══════════════════════════════════════════════════════════════"
@@ -135,7 +142,7 @@ echo "  VALIDATING RESULTS"
 echo "───────────────────────────────────────────────────────────────"
 echo ""
 
-result_count=$(find results -name "fixed-500qps+*__waf-*__*.json" -type f ! -size 0 | wc -l | tr -d ' ')
+result_count=$(find "${RUN_DIR}" -name "${scenario_name}+*__waf-*__*.json" -type f ! -size 0 | wc -l | tr -d ' ')
 echo "  JSON result files: ${result_count}"
 
 if [[ ${result_count} -ge ${tests_total} ]]; then
@@ -150,7 +157,7 @@ echo ""
 echo "  Checking error rates..."
 error_found=false
 
-for result_file in results/fixed-500qps+*__waf-*__*.json; do
+while IFS= read -r result_file; do
     if [[ ! -f "${result_file}" ]] || [[ ! -s "${result_file}" ]]; then
         continue
     fi
@@ -174,10 +181,11 @@ except:
 " 2>/dev/null || echo "ERROR")
 
     if [[ "${error_rate}" == "ERROR" ]] || [[ -n "${error_rate}" ]]; then
-        echo "    ⚠️  $(basename ${result_file}): ${error_rate}% errors"
+        echo "    ⚠️  $(basename "${result_file}"): ${error_rate}% errors"
         error_found=true
     fi
-done
+# Fed by find, not a glob: results now live in this run's own directory.
+done < <(find "${RUN_DIR}" -name "${scenario_name}+*__waf-*__*.json" -type f ! -size 0)
 
 if [[ "${error_found}" == "false" ]]; then
     echo "  ✅ All tests have 0% error rate (detection-only working)"
@@ -191,15 +199,18 @@ echo "  GENERATING COMPREHENSIVE HTML REPORT"
 echo "───────────────────────────────────────────────────────────────"
 echo ""
 
+report_file="${RUN_DIR}/${scenario_name}-report.html"
 if command -v python3 >/dev/null 2>&1; then
-    if python3 generate-report.py; then
+    # One page covering every profile this matrix ran, medianed across whatever
+    # repeats are in results/ — not just the run that finished a moment ago.
+    if python3 scripts/report.py --results "${RUN_DIR}" --scenario "${scenario_name}"; then
         echo ""
-        echo "✅ Comprehensive report generated: results/performance-report.html"
+        echo "✅ Comprehensive report generated: ${report_file}"
         echo ""
         echo "  View report:"
-        echo "    open results/performance-report.html"
+        echo "    open ${report_file}"
         echo ""
-        echo "  File size: $(du -h results/performance-report.html | awk '{print $1}')"
+        echo "  File size: $(du -h "${report_file}" | awk '{print $1}')"
     else
         echo "❌ Error generating comprehensive report"
         exit 1
@@ -216,7 +227,7 @@ echo ""
 echo "📊 Summary:"
 echo "  Tests run: ${tests_run}/${tests_total}"
 echo "  Results: ${result_count} JSON files"
-echo "  Report: results/performance-report.html"
+echo "  Report: ${report_file}"
 echo "  Duration: ${test_duration}s"
 echo ""
 

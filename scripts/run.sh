@@ -70,9 +70,14 @@ if [[ -n "${LOAD_PROFILE:-}" ]]; then
 fi
 [[ -n "${_env_expect_status}" ]] && EXPECT_STATUS="${_env_expect_status}"
 
-mkdir -p "${RESULTS_DIR}"
+# Results go in a per-run directory. suite.sh exports RUN_DIR so every tag of
+# one suite lands together; a direct run.sh gets its own. The directory is
+# named for the scenario, not the result group, so a run of one profile and a
+# run of three sit at the same level.
+RUN_DIR="${RUN_DIR:-$(new_run_dir "$(basename "${SCENARIO_FILE}" .env)")}"
+mkdir -p "${RUN_DIR}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-base="${RESULTS_DIR}/${SCENARIO_NAME}__${TAG}__${stamp}"
+base="${RUN_DIR}/${SCENARIO_NAME}__${TAG}__${stamp}"
 raw_json="${base}.json"
 summary="${base}.summary.txt"
 

@@ -4,11 +4,16 @@
 # given time window and save them alongside the load results. Best-effort:
 # requires a reachable Prometheus (see PROM_* vars in lib.sh).
 #
-#   collect.sh <start_epoch> <end_epoch> [TAG]
+#   collect.sh <start_epoch> <end_epoch> [TAG] [SCENARIO]
+#
+# SCENARIO is the result group run.sh wrote under — "<scenario>" or
+# "<scenario>+<load-profile>". It goes in the filename because report.py has no
+# other way to tell which scenario a metrics window belongs to; without it the
+# file is written anyway but no report will read it.
 #
 # Tip: run.sh prints window_utc; or wrap a run with:
 #   START=$(date -u +%s); scripts/run.sh ...; END=$(date -u +%s)
-#   scripts/collect.sh "$START" "$END" mytag
+#   scripts/collect.sh "$START" "$END" mytag fixed-500qps+args-heavy
 #
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -17,13 +22,26 @@ source ./lib.sh
 require_cmd curl
 preflight
 
-START="${1:?usage: collect.sh <start_epoch> <end_epoch> [TAG]}"
-END="${2:?usage: collect.sh <start_epoch> <end_epoch> [TAG]}"
+START="${1:?usage: collect.sh <start_epoch> <end_epoch> [TAG] [SCENARIO]}"
+END="${2:?usage: collect.sh <start_epoch> <end_epoch> [TAG] [SCENARIO]}"
 TAG="${3:-untagged}"
+SCENARIO="${4:-}"
 STEP="${STEP:-15s}"
 
-mkdir -p "${RESULTS_DIR}"
-out="${RESULTS_DIR}/metrics__${TAG}__$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+# Into the run's own directory when there is one, so a window sits beside the
+# load it describes. RESULTS_DIR otherwise; the reporter reads both.
+RUN_DIR="${RUN_DIR:-${RESULTS_DIR}}"
+mkdir -p "${RUN_DIR}"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ -n "${SCENARIO}" ]]; then
+  out="${RUN_DIR}/metrics__${SCENARIO}__${TAG}__${stamp}.jsonl"
+else
+  # Kept for a hand-run collection, but report.py skips these: a metrics window
+  # that cannot be tied to a scenario used to be folded into whichever scenario
+  # was being reported, pulling another run's server-side numbers into it.
+  out="${RUN_DIR}/metrics__${TAG}__${stamp}.jsonl"
+  warn "no SCENARIO given — report.py cannot attribute this file and will skip it"
+fi
 
 # Curated PromQL: data-plane (WAF) + control-plane (cache + reconcile).
 declare -a QUERIES=(

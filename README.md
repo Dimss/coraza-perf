@@ -111,36 +111,41 @@ scripts/teardown.sh           # deletes the namespace; results/ is kept
 
 ### 3. Generate the HTML report
 
-Reporting needs no cluster — it reads the JSON already in `results/`.
-`scripts/report.py` uses only the standard library; `pip install -r
-requirements.txt` is needed for `generate-report.py` further down, which reads
-rule counts out of the manifests with PyYAML.
+Reporting needs no cluster — it reads the JSON already in `results/`. PyYAML
+(`pip install -r requirements.txt`) lets it count rules out of the ruleset
+manifests; without it the counts fall back to known values and it says so.
 
-`suite.sh` already writes `results/<scenario>+<profile>.html` at the end of each
-invocation. Regenerate it by hand — after the repeats, so the medians cover all
-of them:
-
-```bash
-python3 scripts/report.py --scenario fixed-500qps+args-heavy \
-  --out results/fixed-500qps+args-heavy.html
-open results/fixed-500qps+args-heavy.html
-```
-
-This is the one to report from: it medians the repeats and computes the delta
-against the WAF-off baseline per percentile. Read p95 and p99, never the
-average.
-
-For a matrix overview after `run-comprehensive-tests.sh`:
+`suite.sh` runs it at the end of each invocation. Regenerate by hand after the
+repeats, so the medians cover all of them. With no arguments it rebuilds every
+scenario it finds — one page per scenario, covering every load profile measured
+under it:
 
 ```bash
-pip install -r requirements.txt
-python3 generate-report.py
-open results/performance-report.html
+python3 scripts/report.py
+# >> wrote results/fixed-500qps-report.html
+#    scenario 'fixed-500qps': 3 profile(s) x 4 ruleset(s), 12/12 cells, 12 runs
+open results/fixed-500qps-report.html
 ```
 
-Correct the cluster, Istio, operator and Fortio versions by hand before
-circulating anything from `generate-report.py` — it hardcodes the author's
-cluster. See [Known limitations](#known-limitations).
+`--scenario <name>` narrows it to one, and `--out <file>` overrides the
+destination for that one scenario. Point `--results` at a single run directory
+to report on that session alone — which is what `suite.sh` does for the report
+it drops inside each one:
+
+```bash
+python3 scripts/report.py --results results/fixed-500qps-311026102345
+```
+
+Read p95 and p99, never the average, and read the WAF cost as the delta against
+the `waf-off` column rather than the absolute figure.
+
+The page can only state what the results carry. Set these to have it name the
+cluster too, otherwise they render as "not recorded":
+
+```bash
+PLATFORM="OpenShift 4.22.18" ISTIO_VERSION="v1.27.5" OPERATOR_VERSION="v0.5.0" \
+  python3 scripts/report.py
+```
 
 ---
 
@@ -179,7 +184,7 @@ API server, so a remote cluster works exactly like a local one.
 | Runs on your workstation | Runs inside the cluster |
 |---|---|
 | `scripts/*.sh`, `run-comprehensive-tests.sh` — orchestration | `echo` backend Deployment — the target |
-| `generate-report.py`, `scripts/report.py` — reporting | `loadgen` Deployment (fortio server) — validity probes and the discarded warm-up, driven by `kubectl exec` |
+| `scripts/report.py` — reporting | `loadgen` Deployment (fortio server) — validity probes and the discarded warm-up, driven by `kubectl exec` |
 | `results/` — all raw JSON, summaries, HTML | **one-off fortio Job per measured run** — the actual measurement |
 | `curl` against a port-forwarded Prometheus (`collect.sh`) | Gateway pod (Envoy + `coraza-proxy-wasm`), operator pod, Prometheus |
 
@@ -529,12 +534,19 @@ scripts/waf.sh status        # show engine, ruleset, rulesource, wasmplugin
 ### Collect server-side metrics
 
 ```bash
-scripts/collect.sh <start_epoch> <end_epoch> <tag>
+scripts/collect.sh <start_epoch> <end_epoch> <tag> <scenario>
 # or, for a whole suite:
 COLLECT=true LOAD_PROFILE=args-heavy scripts/suite.sh scenarios/fixed-500qps.env crs
 ```
 
 `run.sh` prints `window_utc=<start>..<end>` for exactly this purpose.
+
+`<scenario>` is the result group the run was written under — `fixed-500qps` or
+`fixed-500qps+args-heavy` — and it goes into the filename
+(`metrics__<scenario>__<tag>__<ts>.jsonl`) because nothing else in a metrics
+window says which run it belongs to. Omit it and the file is still written, but
+`report.py` skips it rather than attribute another scenario's server-side
+numbers to the one being reported.
 
 ### Tear down
 
@@ -609,15 +621,41 @@ re-run the latency cell at a rate the system can hold.
 
 ### Raw output
 
-Each run writes two files to `results/`:
+Every perf-test run gets its own directory under `results/`, named for the
+scenario and the UTC time it started:
 
 ```
-results/<scenario>+<profile>__<tag>__<UTC timestamp>.json         # raw fortio
-results/<scenario>+<profile>__<tag>__<UTC timestamp>.summary.txt  # parsed line
+results/<scenario>-DDMMYYHHMMSS/
+├── <scenario>+<profile>__<tag>__<UTC timestamp>.json         # raw fortio
+├── <scenario>+<profile>__<tag>__<UTC timestamp>.summary.txt  # parsed line
+├── metrics__<scenario>+<profile>__<tag>__<ts>.jsonl          # if COLLECT=true
+└── <scenario>-report.html                                    # this run alone
 ```
 
-Folding the profile into the scenario name keeps runs with different request
-shapes in separate groups so they are never pooled into one median.
+```
+results/
+├── fixed-500qps-311026102345/     # suite.sh, 10:23:45 UTC — baseline + 3 rulesets
+├── fixed-500qps-311026110012/     # the repeat an hour later
+└── fixed-500qps-report.html       # both runs, medianed
+```
+
+One directory per invocation: `suite.sh` puts its baseline and every ruleset
+run in one, and `run-comprehensive-tests.sh` puts all twelve cells in one,
+because a matrix is a single pass. A bare `run.sh` opens its own. Set `RUN_DIR`
+to append to an existing directory instead.
+
+The timestamp is UTC, like every other timestamp the harness writes, so a
+directory and the files inside it agree.
+
+Keeping a run together means it can be archived, attached to a ticket or
+deleted as a unit, and the same-session baseline is never separated from the
+WAF-on runs it is the baseline for. The reporter reads `results/` recursively,
+so medians still span every directory — three suite runs are three directories
+and three repeats per cell.
+
+Folding the profile into the scenario name within a filename keeps runs with
+different request shapes in separate groups so they are never pooled into one
+median.
 
 The summary carries `actual_qps`, `count`, `avg/min/max`, `p50…p99.9`,
 `ret_codes`, `blocked_pct`, `error_pct`, and the `window_utc` range.
@@ -641,33 +679,43 @@ Fortio JSON, abridged:
 }
 ```
 
-### Two report generators
-
-| Generator | Scope | Output |
-|---|---|---|
-| `scripts/report.py` | One scenario group; medians across repeats; delta vs B0; folds in `collect.sh` metrics | `results/<scenario>.html`, run automatically by `suite.sh` |
-| `generate-report.py` | The full 3×4 matrix | `results/performance-report.html` |
-
-Both are self-contained HTML and need no cluster, Prometheus, or Grafana to
-view. `report.py` is the one that computes the **delta vs B0 with repeats** —
-prefer it for anything you intend to report.
-
-`generate-report.py` pipeline:
+### The report generator
 
 ```
-Fortio JSON -> parse_result() -> results{(profile, config)} -> prepare_chart_data()
-            -> DATA object -> templates/report-template.html -> performance-report.html
+results/**/<scenario>[+<profile>]__<tag>__<ts>.json   (every run directory)
+   -> build_cells()      medians across repeats, per (profile, ruleset) cell
+   -> reportlib builders cards, matrix, tables, Chart.js data, findings
+   -> templates/report-template.html
+   -> results/<scenario>-report.html
 ```
 
-It picks the **latest** result per `(profile, config)` pair, so re-running one
-cell updates just that cell. Rule counts come from
-`resolve_rule_counts()` reading the manifests, and the key findings are
+| Piece | Responsibility |
+|---|---|
+| `scripts/report.py` | Discovery, aggregation, validity, substitution |
+| `scripts/reportlib.py` | Every HTML fragment and chart |
+| `templates/report-template.html` | Layout, styling, Chart.js wiring |
+| `generate-report.py` | Shim that delegates to `scripts/report.py` |
+
+Scenario, load profiles and rulesets all come from the filenames, so the page
+covers what ran. Each cell is the **median across its repeats**, not the latest
+run, and each WAF cost is a delta against that profile's own `waf-off` column.
+Rule counts are parsed from the ruleset manifests; the key findings are
 generated from the data rather than written by hand.
 
 Sections: Architecture, Scenario, Profiles, WAF Rulesets, Test Matrix,
-Performance Results (7 charts: latency by profile, CRS overhead, latency
-distribution, complexity impact, rules efficiency, tail-latency gap, p95
-heatmap), and Findings.
+Performance Results (7 charts: latency by profile, WAF overhead, latency
+distribution, complexity impact, rules efficiency, tail-latency ratio, p95
+heatmap), Server-side Summary (only when `collect.sh` metrics exist), and
+Findings.
+
+A banner at the top of the page states anything that makes the report
+unreportable: a profile with no `waf-off` run, a cell that missed its offered
+rate by more than 5%, cells resting on fewer than three repeats, metrics files
+that could not be attributed. The same lines are printed on stdout. The page is
+written either way — what it must not do is look complete when it is not.
+
+Chart.js is loaded from a CDN, so the charts need network access to render;
+every number is already in the page.
 
 ### Reading the numbers
 
@@ -678,7 +726,7 @@ only portable quantity is the delta against a B0 captured in the same session.
 For a quick textual delta without HTML:
 
 ```bash
-grep -H . results/<scenario>__*.summary.txt
+grep -H . results/<scenario>-*/<scenario>*__*.summary.txt
 ```
 
 Then compute `added pN = pN(waf-*) − pN(waf-off)` on the median of repeats.
@@ -805,8 +853,9 @@ image.
 cp manifests/load-profiles/baseline-get.env manifests/load-profiles/my-profile.env
 ```
 
-Edit the shape, then use it with `LOAD_PROFILE=my-profile`. To include it in the
-matrix report, add it to `profiles` in `generate-report.py:1181`.
+Edit the shape, then use it with `LOAD_PROFILE=my-profile`. The report picks it
+up on its own — profiles are discovered from the result filenames — and
+describes it from its `.env` when it has no curated description.
 
 A profile that needs a body file also needs `gen-payloads.sh` and a re-run of
 `setup.sh` so the payload lands in the ConfigMap — and see
@@ -818,14 +867,17 @@ A profile that needs a body file also needs `gen-payloads.sh` and a re-run of
 cp manifests/rulesets/minimal.yaml manifests/rulesets/my-ruleset.yaml
 ```
 
-Use it with `waf.sh on my-ruleset`. Add it to `configs` in
-`generate-report.py:1182` and to `RULESET_FILES` so its rules are counted.
+Use it with `waf.sh on my-ruleset`. The report discovers it from the result
+filenames and counts its rules from `manifests/rulesets/my-ruleset.yaml`. Add
+an entry to `RULESETS` in `scripts/reportlib.py` only if you want curated
+wording on its card instead of the generic descriptor.
 
 ### New scenario
 
-Copy any file in `scenarios/` and set `QPS`, `DURATION`, `CONNS`. If you change
-the scenario *name*, update the glob in `find_latest_result()`
-(`generate-report.py:53`), which is currently hardcoded to `fixed-500qps+`.
+Copy any file in `scenarios/` and set `QPS`, `DURATION`, `CONNS`. The HTML
+report needs no change — it keys off the scenario in the result filenames and
+writes `results/<scenario>-report.html`. `analyze-results.py` is still
+hardcoded to `fixed-500qps`; see [known limitations](#known-limitations).
 
 ### Regenerating CRS
 
@@ -871,17 +923,17 @@ initialize it in the template.
   is `optional` — so a profile whose payload was never built would send an empty
   body. `run.sh` guards against this by checking the key exists in the ConfigMap
   before measuring, and aborts with the `gen-payloads.sh` + `setup.sh` fix.
-- **Both analysis scripts are hardcoded to the `fixed-500qps` scenario.**
-  `generate-report.py` and `analyze-results.py` each carry their own copy of the
-  glob in `find_latest_result()`, so a renamed scenario has to be changed in two
-  places or one of the two silently finds nothing.
-- **Every report claims the author's cluster.** `generate-report.py` bakes
-  `OpenShift 4.22.18`, Istio `v1.27.5`, operator `v0.5.0`, `Fortio 1.76.0` and
-  `500 req/s` in as literals (lines 1226–1230), and
-  `templates/report-template.html` repeats the operator version (line 908),
-  Istio (line 924) and the platform (lines 884 and 920). Nothing reads those
-  facts off the cluster, so a generated report asserts them whatever you
-  actually ran against. Correct them by hand before circulating a number.
+- **`analyze-results.py` is hardcoded to the `fixed-500qps` scenario** and to
+  its own ruleset labels, so its text tables describe that scenario whatever
+  you ran, and silently find nothing under another name. The HTML report no
+  longer shares this: it discovers scenario, profiles and rulesets from the
+  result filenames.
+- **The report can only name the cluster you tell it about.** Nothing in
+  `results/` records the platform, Istio or operator version, so they come from
+  `PLATFORM`, `ISTIO_VERSION` and `OPERATOR_VERSION` and render as "not
+  recorded" when unset. This replaced a set of literals that asserted the
+  author's cluster on every report; a blank is recoverable, a confident wrong
+  version is not. Fortio's version is read from the result JSON.
 - **The fortio image is unpinned.** The default is still `fortio/fortio:latest`,
   which sits badly with the Fortio v1.76+ line in [Dependencies](#dependencies)
   — two sessions weeks apart may not have measured with the same load
@@ -956,9 +1008,9 @@ taking the median with spread. Warm-up is already handled by `run.sh`.
 ### Report generation fails
 
 ```bash
-python3 -u generate-report.py 2>&1 | tee report-gen.log
-python3 --version                      # 3.7+
-ls -l templates/report-template.html
+python3 -u scripts/report.py 2>&1 | tee report-gen.log
+python3 --version                      # 3.8+
+ls -l templates/report-template.html scripts/reportlib.py
 ```
 
 ---
@@ -973,9 +1025,9 @@ waf-perf-test/
 ├── NOTICE                        # vendored CoreRuleSet attribution
 ├── lib.sh                        # shared config + helpers (sourced, not run)
 ├── run-comprehensive-tests.sh    # the 12-cell matrix + report
-├── generate-report.py            # matrix report generator
+├── generate-report.py            # shim -> scripts/report.py
 ├── analyze-results.py            # data analysis helper
-├── requirements.txt              # Python deps for the report generators
+├── requirements.txt              # PyYAML, for rule counts (optional)
 ├── scripts/
 │   ├── prereqs/                  # one-time cluster install: Istio, CRDs, operator
 │   │   ├── check.sh              # verify prerequisites, fail fast
@@ -991,7 +1043,7 @@ waf-perf-test/
 │   ├── suite.sh                  # B0 + one run per ruleset (canonical)
 │   ├── collect.sh                # pull Prometheus metrics for a window
 │   ├── report.py                 # per-scenario report, delta vs B0
-│   ├── report.tpl.html
+│   ├── reportlib.py              # HTML fragments and Chart.js data
 │   └── teardown.sh
 ├── scenarios/                    # QPS / duration / connections
 ├── manifests/
@@ -1027,9 +1079,9 @@ The vendored OWASP CoreRuleSet content in `manifests/rulesets/crs.yaml` is redis
 
 ### Dependencies
 
-Python 3.8+ and a modern browser for reports. `generate-report.py` imports
-`yaml` unguarded, so PyYAML is required, not optional — it is pinned in
-`requirements.txt`:
+Python 3.8+ and a modern browser for reports. PyYAML is optional: the report
+uses it to count rules in `manifests/rulesets/*.yaml`, and falls back to known
+counts with a warning when it is missing. It is pinned in `requirements.txt`:
 
 ```bash
 pip install -r requirements.txt

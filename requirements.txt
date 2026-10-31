@@ -1,3 +1,4 @@
-# generate-report.py imports yaml unguarded to read rule counts out of
-# manifests/rulesets/*.yaml. Without this it fails at import.
+# scripts/reportlib.py uses yaml to count rules in manifests/rulesets/*.yaml
+# for the report's cards and charts. Optional: without it the counts fall back
+# to known values and the generator says so.
 PyYAML==6.0.3
