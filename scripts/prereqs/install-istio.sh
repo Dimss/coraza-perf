@@ -61,10 +61,20 @@ EOF
   log "Waiting for GatewayClass '${GATEWAY_CLASS}' to be accepted"
   "${CLI}" wait --for=condition=Accepted "gatewayclass/${GATEWAY_CLASS}" --timeout=600s
 
+  # '|| true' is load-bearing, not defensive noise. This is a cosmetic version
+  # readout, but grep exits 1 when it matches nothing, pipefail turns that into
+  # the pipeline's status, and a standalone assignment takes the pipeline's
+  # status as its own — so set -e kills the script here. The 2>/dev/null only
+  # covers the 'get', and ${pinned:-unknown} below never gets the chance to do
+  # its job. An ingress operator that does not publish these two variables,
+  # under a different name, or in a namespace we cannot read, would therefore
+  # abort install-istio.sh *after* Istio is fully installed and working — and
+  # install-all.sh would stop there, leaving a cluster with a healthy Istio and
+  # no operator, having printed nothing that points at the cause.
   local pinned
   pinned="$("${CLI}" get deploy ingress-operator -n openshift-ingress-operator \
     -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null \
-    | grep -E '^(GATEWAY_API_OPERATOR_VERSION|ISTIO_VERSION)=' | tr '\n' ' ')"
+    | grep -E '^(GATEWAY_API_OPERATOR_VERSION|ISTIO_VERSION)=' | tr '\n' ' ' || true)"
   ok "Istio ready. Versions the cluster pinned: ${pinned:-unknown}"
   warn "Record those in any report: nothing in generate-report.py reads them."
 }

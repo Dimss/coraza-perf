@@ -93,9 +93,18 @@ if [[ -z "${CORAZA_IMAGE_REPO}" ]]; then
   CORAZA_CRD_REF="${CORAZA_CRD_REF:-${CORAZA_IMAGE_TAG}}"
 fi
 
+# No --wait, deliberately. The chart's ClusterRole is pinned to the chart the
+# same way its CRDs are, so when the image comes from a newer release line the
+# manager watches resources the rules do not grant and cannot start at all.
+# That is corrected below, after helm has created the ClusterRole — which it
+# must, because templates/clusterrole.yaml is unconditional with hardcoded
+# rules and the chart has no rbac.create value to switch it off, so there is no
+# --skip-crds equivalent for RBAC. With --wait, helm would block the full
+# timeout watching a pod that cannot come up until that correction lands. The
+# Available wait happens afterwards instead, and is no weaker for it.
 args=(upgrade --install "${CORAZA_RELEASE}" "${CORAZA_CHART}"
       --namespace "${CORAZA_NAMESPACE}" --create-namespace
-      --wait --timeout 10m)
+      --timeout 10m)
 
 [[ -n "${CORAZA_CHART_VERSION}" ]] && args+=(--version "${CORAZA_CHART_VERSION}")
 
@@ -206,6 +215,95 @@ fi
 
 log "Installing ${CORAZA_CHART} into '${CORAZA_NAMESPACE}'"
 helm "${args[@]}"
+
+# --- RBAC, paired with the image exactly as the CRDs are --------------------
+#
+# Same defect, same cause, different object. Chart 0.5.0 grants
+# gateway.networking.k8s.io/gateways but not gatewayclasses, and nothing at all
+# in telemetry.istio.io; the waf-0-7 builds watch both. controller-runtime
+# treats a cache that cannot sync as fatal, so the manager pulls its image,
+# wins leader election, runs until the sync deadline and exits — CrashLoopBackOff,
+# with the two "is forbidden" lines scrolled past minutes earlier and the fatal
+# line reading only "failed to wait for rulesource caches to sync". Nothing in
+# that sequence names RBAC.
+#
+# Only in the CRD_REF path. That is where we know which commit the image came
+# from, so it is the only case where the matching rules are reachable; with
+# CORAZA_CRD_DIR the caller is running their own build and owns its RBAC.
+if [[ -z "${CORAZA_CRD_DIR}" && -n "${CORAZA_CRD_REF}" ]]; then
+  log "Pairing RBAC with the image from ${CORAZA_BUILD_REPO}@${CORAZA_CRD_REF:0:12}"
+  csv_file="$(mktemp)"
+  if ! curl -fsSL -o "${csv_file}" \
+       "https://raw.githubusercontent.com/${CORAZA_BUILD_REPO}/${CORAZA_CRD_REF}/${CORAZA_BUILD_CRD_PATH}/${CORAZA_BUNDLE_CSV}"; then
+    warn "no CSV at that commit — leaving the chart's RBAC in place."
+    warn "If the manager crashloops on 'caches to sync', this is why; check.sh names it."
+  else
+    # The ClusterRole is found by label rather than by name: the chart builds
+    # the name from a template, and the release name is a variable here.
+    cr_name="$("${CLI}" get clusterrole \
+      -l "app.kubernetes.io/name=coraza-kubernetes-operator" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -z "${cr_name}" ]]; then
+      warn "no ClusterRole labelled app.kubernetes.io/name=coraza-kubernetes-operator;"
+      warn "leaving RBAC as the chart installed it."
+    else
+      # PyYAML, not '${CLI} create --dry-run=client': that needs a RESTMapping
+      # for ClusterServiceVersion, so it only parses on a cluster that happens
+      # to have OLM installed. python3 is already required by this script.
+      if rbac_yaml="$(python3 - "${csv_file}" "${cr_name}" <<'PY'
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(3)
+csv_path, name = sys.argv[1], sys.argv[2]
+with open(csv_path) as fh:
+    csv = yaml.safe_load(fh)
+perms = csv.get("spec", {}).get("install", {}).get("spec", {}).get("clusterPermissions", [])
+rules = [r for p in perms for r in p.get("rules", [])]
+if not rules:
+    sys.exit(4)
+print(yaml.safe_dump({
+    "apiVersion": "rbac.authorization.k8s.io/v1",
+    "kind": "ClusterRole",
+    "metadata": {"name": name},
+    "rules": rules,
+}, default_flow_style=False))
+PY
+      )"; then
+        # Server-side with --force-conflicts, same as the CRDs: helm owns these
+        # fields, and the point is to take them over rather than collide.
+        printf '%s' "${rbac_yaml}" | "${CLI}" apply --server-side --force-conflicts \
+          --field-manager=waf-perf-test -f - >/dev/null
+        ok "ClusterRole '${cr_name}' now carries the image's own rules"
+        # The pod is already backing off by now; without this it waits out the
+        # CrashLoopBackOff interval before retrying with the corrected rules.
+        "${CLI}" rollout restart deploy -n "${CORAZA_NAMESPACE}" \
+          -l "app.kubernetes.io/name=coraza-kubernetes-operator" >/dev/null 2>&1 || true
+      else
+        rc=$?
+        case "${rc}" in
+          3) warn "PyYAML not installed, so the CSV cannot be read: 'pip install -r requirements.txt'." ;;
+          4) warn "the CSV at that commit declares no clusterPermissions." ;;
+          *) warn "could not read clusterPermissions out of the CSV (exit ${rc})." ;;
+        esac
+        warn "Leaving the chart's RBAC in place; the manager may crashloop on 'caches to sync'."
+      fi
+    fi
+  fi
+  rm -f "${csv_file}"
+fi
+
+# Ours rather than helm's, for the reason given where --wait was dropped.
+log "Waiting up to ${CORAZA_WAIT_TIMEOUT} for the operator to become Available"
+if ! "${CLI}" wait --for=condition=Available deploy \
+     -l "app.kubernetes.io/name=coraza-kubernetes-operator" \
+     -n "${CORAZA_NAMESPACE}" --timeout="${CORAZA_WAIT_TIMEOUT}"; then
+  err "the operator did not become Available."
+  err "If its log shows 'is forbidden', the chart's RBAC is older than the image:"
+  err "  ${CLI} logs -n ${CORAZA_NAMESPACE} deploy/${CORAZA_RELEASE} | grep forbidden"
+  exit 1
+fi
 
 # No f-string: backslash escapes inside an f-string expression are a syntax
 # error before Python 3.12, and this silently printed "unknown" because of it.

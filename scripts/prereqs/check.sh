@@ -68,10 +68,52 @@ for crd in rulesources ruledata; do
     crd_has_status "${crd}.waf.k8s.coraza.io"
 done
 
-check "Coraza operator available in '${CORAZA_NAMESPACE}'" \
-  "operator CRDs exist but no manager is running — ${CLI} get pods -n ${CORAZA_NAMESPACE}" \
-  "${CLI}" wait --for=condition=Available deploy -l app.kubernetes.io/name=coraza-kubernetes-operator \
-  -n "${CORAZA_NAMESPACE}" --timeout=5s
+# Not written with check(), because the useful message depends on why it
+# failed and check() fixes its hint before running the predicate.
+#
+# The common cause is RBAC older than the image, and it is near-invisible from
+# the outside: the manager pulls, starts, wins leader election, then exits when
+# its caches cannot sync, so 'get pods' shows CrashLoopBackOff and the fatal
+# log line reads "failed to wait for rulesource caches to sync". The actual
+# denials are "is forbidden" warnings minutes earlier in the same log. Chart
+# 0.5.0 against a waf-0-7 image misses telemetry.istio.io/telemetries and
+# gateway.networking.k8s.io/gatewayclasses this way. Name it here rather than
+# leave it to be rediscovered.
+operator_denied_rules() {
+  local logs
+  for prev in "" "--previous"; do
+    # shellcheck disable=SC2086
+    logs="$("${CLI}" logs -n "${CORAZA_NAMESPACE}" \
+      -l app.kubernetes.io/name=coraza-kubernetes-operator \
+      --tail=3000 --all-containers ${prev} 2>/dev/null || true)"
+    [[ -n "${logs}" ]] || continue
+    local found
+    found="$(printf '%s' "${logs}" \
+      | grep -oE 'cannot [a-z]+ resource \\?"[a-z]+\\?" in API group \\?"[^"\\]*\\?"' \
+      | sed -E 's|.*resource \\?"([a-z]+)\\?".*API group \\?"([^"\\]*)\\?".*|\2/\1|' \
+      | sort -u | tr '\n' ' ' || true)"
+    [[ -n "${found}" ]] && { printf '%s' "${found% }"; return 0; }
+  done
+  return 0
+}
+
+if "${CLI}" wait --for=condition=Available deploy \
+     -l app.kubernetes.io/name=coraza-kubernetes-operator \
+     -n "${CORAZA_NAMESPACE}" --timeout=5s >/dev/null 2>&1; then
+  ok "Coraza operator available in '${CORAZA_NAMESPACE}'"
+else
+  denied="$(operator_denied_rules)"
+  if [[ -n "${denied}" ]]; then
+    err "Coraza operator available in '${CORAZA_NAMESPACE}' — RBAC is older than the operator image."
+    err "  the manager is denied: ${denied}"
+    err "  its caches cannot sync, so it exits and the pod crashloops."
+    err "  fix: re-run scripts/prereqs/install-operator.sh, which now takes the"
+    err "       ClusterRole from the same commit as the image."
+  else
+    err "Coraza operator available in '${CORAZA_NAMESPACE}' — operator CRDs exist but no manager is running — ${CLI} get pods -n ${CORAZA_NAMESPACE}"
+  fi
+  missing=$((missing + 1))
+fi
 
 # Optional, and only a warning: collect.sh needs it, a latency run does not.
 if "${CLI}" get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then

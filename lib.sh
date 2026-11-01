@@ -147,6 +147,15 @@ CORAZA_QUAY_REPO="${CORAZA_QUAY_REPO:-redhat-user-workloads-stage/waf-tenant/waf
 # together rather than hoping the chart's are current.
 CORAZA_BUILD_REPO="${CORAZA_BUILD_REPO:-networking-incubator/build-waf}"
 CORAZA_BUILD_CRD_PATH="${CORAZA_BUILD_CRD_PATH:-images/bundle/manifests}"
+# The CSV in that same bundle directory. Its clusterPermissions are the RBAC
+# the image expects, which the chart's ClusterRole is not: the chart pins its
+# rules to the chart version exactly as it pins its CRDs, and a manager from a
+# newer release line watches resources those rules do not grant.
+CORAZA_BUNDLE_CSV="${CORAZA_BUNDLE_CSV:-coraza-kubernetes-operator.clusterserviceversion.yaml}"
+# How long to wait for the operator Deployment to go Available. This is ours
+# rather than helm's --wait: the RBAC has to be corrected after helm creates
+# the ClusterRole, so helm must not block on a manager that cannot start yet.
+CORAZA_WAIT_TIMEOUT="${CORAZA_WAIT_TIMEOUT:-300s}"
 # Commit in CORAZA_BUILD_REPO to take CRDs from. Empty means "whatever image
 # was resolved", and it is set for you. Set it by hand only when overriding the
 # image with a build whose tag means nothing in that repo.
