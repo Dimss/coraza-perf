@@ -36,9 +36,10 @@ the **delta against a WAF-off baseline captured in the same session** — see
 ### 1. Prepare the cluster
 
 A measurement run assumes Istio, the Gateway API CRDs and the Coraza operator
-are already on the cluster. `setup.sh` does not check, and a missing piece
-shows up as a hang on the Gateway readiness wait rather than an error, so
-check first:
+are already on the cluster. `setup.sh`, `suite.sh` and
+`run-comprehensive-tests.sh` each gate on `check.sh` before they touch
+anything, so a missing piece is named up front rather than surfacing as a hang
+on the Gateway readiness wait. Install it once:
 
 ```bash
 scripts/prereqs/check.sh         # what is missing
@@ -478,7 +479,10 @@ scripts/prereqs/install-all.sh   # install whatever check.sh reported missing
 ```
 
 One-time per cluster, and deliberately outside `setup.sh`: installing Istio
-restarts the gateway proxy, so it must not happen inside a session.
+restarts the gateway proxy, so it must not happen inside a session. The
+measurement scripts only *verify* — `setup.sh`, `suite.sh` and
+`run-comprehensive-tests.sh` run `check.sh` and refuse to start if anything is
+missing (`PREREQS_CHECKED=true` skips that gate).
 [docs/prerequisites.md](docs/prerequisites.md) has the per-platform detail.
 
 ### Provision the target
@@ -828,6 +832,7 @@ Environment variables; defaults in `lib.sh`.
 | `EXPECT_WASM` | unset | Assert a WasmPlugin is (`true`) or isn't (`false`) attached; `suite.sh` sets `false` on the baseline |
 | `WAIT_TIMEOUT` | `180s` | Readiness wait timeout |
 | `WASM_WAIT_TIMEOUT` | `60` | Seconds `waf.sh off` waits for the WasmPlugin to be withdrawn |
+| `PREREQS_CHECKED` | `false` | Skip the `prereqs/check.sh` gate in `setup.sh`, `suite.sh` and `run-comprehensive-tests.sh`. Set automatically once the gate passes, so a wrapper does not repeat it; set it by hand only for an operator deployed outside `CORAZA_NAMESPACE` (e.g. `make deploy` from the operator repo) |
 | `CORAZA_IMAGE_REPO` / `CORAZA_IMAGE_TAG` | chart default | Operator image; override for a locally built one |
 | `CORAZA_CRD_DIR` | chart's `crds/` | CRD source. Set it to `<operator-checkout>/config/crd/bases` whenever `CORAZA_IMAGE_REPO` is set — image and CRDs must come from the same revision |
 | `RESULTS_DIR` | `./results` | Where results are written |

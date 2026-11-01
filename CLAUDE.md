@@ -38,7 +38,9 @@ An `ActualQPS` shortfall is itself a finding — the system could not hold the o
 All scripts resolve their own paths, so they work when invoked from anywhere.
 
 ```bash
-scripts/prereqs/check.sh              # verify cluster prerequisites; run before setup.sh
+scripts/prereqs/check.sh              # verify cluster prerequisites; setup.sh, suite.sh and
+                                      # run-comprehensive-tests.sh now gate on it themselves
+                                      # (PREREQS_CHECKED=true skips it)
 scripts/prereqs/install-all.sh        # one-time: Gateway API, Istio, operator
 scripts/setup.sh                      # provision namespace, backend, loadgen, Gateway, payloads
 scripts/waf.sh on <minimal|medium|crs>  # or: off | status

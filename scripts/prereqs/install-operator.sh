@@ -65,7 +65,28 @@ fi
 # route for a build of your own.
 if [[ -z "${CORAZA_IMAGE_REPO}" ]]; then
   log "No CORAZA_IMAGE_REPO set — resolving a build for this cluster"
-  eval "$(./scripts/prereqs/resolve-operator-image.sh)"
+  # Captured first, then eval'd, so the resolver's exit status survives.
+  # 'eval "$(resolver)"' discards it: the substitution's status is not eval's,
+  # and eval of an empty string succeeds, so set -e never fires. A resolver
+  # that failed — quay unreachable, no build carrying this architecture, a
+  # garbage-collected tag — then left CORAZA_IMAGE_REPO empty and the install
+  # silently fell back to the chart's amd64-only image, which is the one thing
+  # this whole branch exists to avoid. On an arm64 cluster that surfaces ten
+  # minutes later as a helm --wait timeout on a pod that could never start.
+  resolver_out="$(./scripts/prereqs/resolve-operator-image.sh)" || {
+    err "could not resolve an operator image for this cluster."
+    err "Without one the chart's default is amd64-only and the manager may never start."
+    err "Set CORAZA_IMAGE_REPO/CORAZA_IMAGE_TAG for a build of your own, with"
+    err "CORAZA_CRD_DIR=<checkout>/config/crd/bases for the revision it was built from."
+    exit 1
+  }
+  eval "${resolver_out}"
+  # Belt and braces: a resolver that exits 0 having printed nothing usable
+  # would otherwise reach helm with the same empty variable.
+  [[ -n "${CORAZA_IMAGE_REPO}" ]] || {
+    err "resolve-operator-image.sh succeeded but set no CORAZA_IMAGE_REPO."
+    exit 1
+  }
   # The resolved tag is a commit in CORAZA_BUILD_REPO, so the CRDs that match
   # this exact image are reachable. Do not infer that for an image the caller
   # chose: its tag means nothing in that repo.

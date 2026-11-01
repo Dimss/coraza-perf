@@ -57,6 +57,7 @@ resolve_ruleset() {
 cmd="${1:-}"; shift || true
 case "${cmd}" in
   on)
+    require_operator_crds
     ruleset_file="$(resolve_ruleset "${1:-minimal}")"
     log "Applying ruleset from $(basename "${ruleset_file}")"
     "${CLI}" apply -n "${NAMESPACE}" -f "${ruleset_file}"
@@ -78,6 +79,11 @@ case "${cmd}" in
     ok "WAF enabled."
     ;;
   off)
+    # Checked even though 'off' is the state a missing operator leaves you in.
+    # Returning success here would be a lie with consequences: the suite would
+    # record a WAF-off baseline, then fail on the first 'waf.sh on' with
+    # nothing to compare it against, having spent the scenario duration on it.
+    require_operator_crds
     log "Removing Engine '${ENGINE_NAME}' (WAF off / baseline)"
     "${CLI}" delete -n "${NAMESPACE}" engine "${ENGINE_NAME}" --ignore-not-found
     # The delete returns when the API server accepts it, not when the filter is
@@ -109,7 +115,17 @@ case "${cmd}" in
     esac
     ;;
   status)
-    "${CLI}" get -n "${NAMESPACE}" engine,ruleset,rulesource 2>/dev/null || true
+    # Diagnostic, so it reports rather than exits — but it must not report
+    # silence as "nothing configured". Both gets swallow their stderr, so with
+    # no CRDs this printed two blank lines, which reads exactly like a healthy
+    # WAF-off cluster.
+    missing="$(missing_operator_crds)"
+    if [[ -n "${missing}" ]]; then
+      warn "Coraza operator CRDs not found: ${missing}"
+      warn "Engine/RuleSet state is unknown, not empty — scripts/prereqs/install-operator.sh"
+    else
+      "${CLI}" get -n "${NAMESPACE}" engine,ruleset,rulesource 2>/dev/null || true
+    fi
     "${CLI}" get -n "${NAMESPACE}" wasmplugin 2>/dev/null || true
     ;;
   *)

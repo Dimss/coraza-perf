@@ -54,6 +54,19 @@ read -r scenario_qps scenario_duration scenario_conns < <(
     source "${SCENARIO_FILE}"; echo "${QPS:-?} ${DURATION:-?} ${CONNS:-?}"
 )
 
+# Gated here, before the run directory exists. There used to be an
+# unconditional echo of "All prerequisites verified" further down, below the
+# banner, which looked at nothing: the only checks above it confirm that the
+# scenario and load-profile files are on disk. A cluster with no operator
+# installed got the tick, opened a run directory, and then died on the first
+# 'waf.sh off' with 'the server doesn't have a resource type "engine"' —
+# leaving an empty results/<scenario>-<ts>/ behind for a matrix that ran no
+# cells. Checking before new_run_dir is what keeps those from accumulating.
+# Exports PREREQS_CHECKED, so the three suite.sh invocations below inherit the
+# result instead of repeating the report once per profile.
+require_prereqs
+echo ""
+
 # One directory for the whole matrix, not one per profile: the twelve cells are
 # a single pass and belong together. Exported before the loop so each suite.sh
 # writes into it instead of opening its own (new_run_dir comes from lib.sh,
@@ -74,9 +87,6 @@ echo ""
 echo "  Detection-only mode: Expected (0% error rate)"
 echo "  Repeats: 1 per cell — indicative only; the methodology wants >=3."
 echo "           Re-run this script and take medians before reporting."
-echo ""
-
-echo "✅ All prerequisites verified"
 echo ""
 echo "───────────────────────────────────────────────────────────────"
 echo ""
