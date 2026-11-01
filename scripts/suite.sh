@@ -25,6 +25,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # shellcheck source=../lib.sh
 source ./lib.sh
 preflight
+# preflight only proves the API is reachable. The suite's first act is to take
+# a baseline, which is the most expensive thing to discover is unusable: a
+# missing operator surfaces as a CLI error on an unknown kind, and a CRD older
+# than the operator surfaces a ruleset later as a Ready wait that times out.
+# Both are a couple of seconds to check here.
+require_prereqs
 
 SCENARIO_FILE="${1:?usage: suite.sh <scenario-file> [rulesets...]}"; shift || true
 # Default covers the full cost curve: WASM floor -> typical policy -> CRS.

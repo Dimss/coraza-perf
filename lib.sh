@@ -164,6 +164,14 @@ CORAZA_CRD_REF="${CORAZA_CRD_REF:-}"
 # 'oc wait ruleset --for=condition=Ready'. See docs/prerequisites.md.
 CORAZA_CRD_DIR="${CORAZA_CRD_DIR:-}"
 
+# Set by require_prereqs once scripts/prereqs/check.sh has passed, so a wrapper
+# that already ran it does not repeat the whole report before each inner
+# invocation (run-comprehensive-tests.sh calls suite.sh once per profile).
+# Setting it in the environment by hand skips the gate — the escape hatch for
+# an operator deployed some other way, e.g. 'make deploy' from the operator
+# repo into a namespace check.sh does not know about.
+PREREQS_CHECKED="${PREREQS_CHECKED:-false}"
+
 # --- logging ----------------------------------------------------------------
 if [[ -t 1 ]]; then
   _B="\033[1;34m"; _G="\033[1;32m"; _Y="\033[1;33m"; _R="\033[1;31m"; _X="\033[0m"
@@ -204,6 +212,52 @@ require_platform_match() {
 }
 
 has_crd() { "${CLI}" get crd "$1" >/dev/null 2>&1; }
+
+# The CRDs every waf.sh verb needs. Checked up front because without them the
+# CLI fails on the kind rather than the object: 'the server doesn't have a
+# resource type "engine"'. --ignore-not-found does not cover that — it
+# suppresses a missing object, not a missing kind — so 'waf.sh off' exits 1 on
+# the very first step of a suite, and the message names neither the operator
+# nor the installer that would fix it.
+CORAZA_CRDS=(
+  engines.waf.k8s.coraza.io
+  rulesets.waf.k8s.coraza.io
+  rulesources.waf.k8s.coraza.io
+)
+
+# Space-separated names of the Coraza CRDs that are absent; empty when all are
+# present.
+missing_operator_crds() {
+  local crd out=""
+  for crd in "${CORAZA_CRDS[@]}"; do
+    has_crd "${crd}" || out+="${crd} "
+  done
+  printf '%s' "${out% }"
+}
+
+require_operator_crds() {
+  local missing; missing="$(missing_operator_crds)"
+  [[ -z "${missing}" ]] && return 0
+  err "Coraza operator CRDs not found: ${missing}"
+  err "The operator is not installed on this cluster, so there is no WAF to toggle."
+  err "Install it:  scripts/prereqs/install-operator.sh  (or install-all.sh for everything)"
+  err "Then verify: scripts/prereqs/check.sh"
+  exit 1
+}
+
+# Gate an entry point on the full prerequisite check. The alternative — letting
+# a run start and fail on whichever resource it touches first — costs a cluster
+# setup and reports the symptom instead of the cause.
+require_prereqs() {
+  [[ "${PREREQS_CHECKED}" == "true" ]] && return 0
+  # PT_ROOT, not a relative path: every caller happens to cd to the root first,
+  # but the convention here is that a script works from anywhere.
+  "${PT_ROOT}/scripts/prereqs/check.sh" || {
+    err "Not starting a run: the cluster cannot produce a valid measurement yet."
+    exit 1
+  }
+  export PREREQS_CHECKED=true
+}
 
 # Space-separated names of the WasmPlugins in the test namespace, which is the
 # control-plane view of whether Envoy is running the WAF filter. The operator

@@ -8,6 +8,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # shellcheck source=../lib.sh
 source ./lib.sh
 preflight
+# Gated for the reason check.sh's own header gives: with no GatewayClass or no
+# Istio, this script applies the Gateway and then waits on a Programmed
+# condition that never arrives, which reads as a hang rather than a missing
+# prerequisite. It also catches the operator being absent now, instead of
+# leaving that for the first waf.sh of the first suite.
+require_prereqs
 
 log "Creating namespace '${NAMESPACE}'"
 "${CLI}" create namespace "${NAMESPACE}" --dry-run=client -o yaml | "${CLI}" apply -f -
