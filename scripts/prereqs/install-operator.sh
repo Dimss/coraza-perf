@@ -118,6 +118,25 @@ args=(upgrade --install "${CORAZA_RELEASE}" "${CORAZA_CHART}"
 # --skip-crds is the supported way to say "they are handled".
 [[ -n "${CORAZA_CRD_REF}${CORAZA_CRD_DIR}" ]] && args+=(--skip-crds)
 
+# The same collision, one object over, and the one place --skip-crds has no
+# counterpart: the RBAC correction below takes .rules on the ClusterRole under
+# field manager 'waf-perf-test'. That makes the FIRST install succeed and every
+# re-run fail, because helm's server-side apply then finds a field it does not
+# own and aborts the whole upgrade:
+#   conflict with "waf-perf-test": .rules
+# This script is documented as safe to re-run and install-all.sh calls it
+# unconditionally, so a second run has to work. Letting helm force the field
+# back costs nothing: the correction below immediately re-applies the image's
+# rules over the chart's with --force-conflicts of its own, so the end state
+# after a re-run is byte-identical to a first install. Deleting the ClusterRole
+# first would also clear the conflict, but it revokes a running manager's
+# permissions for as long as the upgrade takes.
+#
+# Conditional because helm 3 has no such flag and would fail on an unknown one.
+if helm upgrade --help 2>/dev/null | grep -q -- '--force-conflicts'; then
+  args+=(--force-conflicts)
+fi
+
 # The pairing, stated once where both halves are known. An image that is not
 # the chart's means the chart's CRDs are not the matching ones either: the two
 # ship together and only agree when both come from the same revision. The
