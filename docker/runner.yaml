@@ -1,0 +1,124 @@
+# In-cluster runner for the Coraza WAF performance harness.
+#
+# A long-lived, idle pod holding the harness and its tooling. The quick start
+# is then driven with `oc exec` against it instead of from a workstation.
+#
+# Why its own namespace: teardown.sh deletes NAMESPACE (waf-perf). A runner
+# living there would delete itself mid-flow.
+#
+# The image reference is the in-cluster registry's own service name, which is
+# what the kubelet pulls — not the external route, which is self-signed and
+# only reachable from outside. docker/build-and-deploy.sh builds into exactly
+# this tag, so this file is applied as-is; set IMAGE there to point the
+# Deployment somewhere else.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: waf-perf-runner
+  labels:
+    app.kubernetes.io/part-of: waf-perf-test
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: waf-perf-runner
+  namespace: waf-perf-runner
+---
+# cluster-admin, and not a narrower role, because install-all.sh installs CRDs,
+# a GatewayClass, a Helm release with its own ClusterRole, and then corrects
+# that ClusterRole from the operator bundle's CSV. Enumerating that set would
+# be a second copy of the installer's RBAC, drifting against it. This pod is a
+# cluster-setup tool; it already has the authority its job needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: waf-perf-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: waf-perf-runner
+    namespace: waf-perf-runner
+---
+# results/ outlives the pod. A matrix is ~45-55 minutes; losing it to a restart
+# and silently re-running is how a half-finished matrix ends up pooled with a
+# complete one in the same median.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: waf-perf-results
+  namespace: waf-perf-runner
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-perf-runner
+  namespace: waf-perf-runner
+  labels:
+    app: waf-perf-runner
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: the PVC is RWO and a second pod would block
+  # on the volume rather than take over.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: waf-perf-runner
+  template:
+    metadata:
+      labels:
+        app: waf-perf-runner
+      annotations:
+        # The runner only issues control-plane calls, but it shares a node with
+        # the gateway under test on a single-node cluster. A sidecar here would
+        # be CPU competing with the proxy being measured.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: waf-perf-runner
+      # The harness writes into its own checkout (results/, rendered manifests)
+      # and helm writes caches. Running as root sidesteps the arbitrary-UID
+      # question on the PVC, which the hostpath provisioner does not chgrp.
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: runner
+          image: image-registry.openshift-image-registry.svc:5000/waf-perf-runner/waf-perf-runner:latest
+          imagePullPolicy: Always
+          command: ["sleep", "infinity"]
+          # No KUBECONFIG: with the variable absent, oc falls back to the
+          # in-cluster ServiceAccount token mounted at
+          # /var/run/secrets/kubernetes.io/serviceaccount.
+          env:
+            - name: HOME
+              value: /home/runner
+          # Orchestration only — the load is a separate fortio Job. Kept small
+          # on purpose: on a single-node cluster every core this pod reserves
+          # is a core the gateway and the load generator do not get.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: results
+              mountPath: /opt/waf-perf-test/results
+            - name: home
+              mountPath: /home/runner
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: waf-perf-results
+        - name: home
+          emptyDir: {}

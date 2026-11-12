@@ -51,6 +51,24 @@ scripts/teardown.sh                   # delete the namespace; results are kept
 scripts/prereqs/uninstall-operator.sh # also remove the operator, its RBAC and CRDs
 ```
 
+The same flow runs from inside the cluster, which is what a long matrix should
+use: a laptop that sleeps or a reset `oc exec` stream kills a 45-minute run.
+Nothing about the measurement changes — the load was always an in-cluster Job.
+
+```bash
+docker/build-and-deploy.sh            # build the runner image on the cluster, deploy it
+docker/run-in-cluster.sh prereqs      # install-all.sh, from the pod
+docker/run-in-cluster.sh setup        # setup.sh
+docker/run-in-cluster.sh matrix       # run-comprehensive-tests.sh, detached
+docker/run-in-cluster.sh logs|status|fetch ./results
+```
+
+The runner is an idle pod in its own namespace (`waf-perf-runner`, so
+`teardown.sh` does not delete it), authenticating with its ServiceAccount —
+no kubeconfig is baked in — and writing `results/` to a PVC. The image is
+built by an OpenShift binary BuildConfig, not pushed from a workstation; see
+`docs/in-cluster-runner.md`.
+
 Reporting needs no cluster:
 
 ```bash
