@@ -110,6 +110,27 @@ When you are done:
 scripts/teardown.sh           # deletes the namespace; results/ is kept
 ```
 
+### Running it from inside the cluster instead
+
+The orchestration above is ordinary bash on your workstation, which means a
+45-minute matrix depends on your laptop staying awake and your connection to
+the API server surviving. It does not have to:
+
+```bash
+docker/build-and-deploy.sh            # build the runner image on the cluster, deploy it
+docker/run-in-cluster.sh prereqs      # install-all.sh, from the pod
+docker/run-in-cluster.sh setup        # setup.sh
+docker/run-in-cluster.sh matrix       # the 12-cell matrix, detached
+docker/run-in-cluster.sh logs         # follow it; Ctrl-C does not stop the run
+docker/run-in-cluster.sh fetch ./results
+```
+
+This changes nothing about the measurement — the load was always a fortio Job
+inside the cluster, and the workstation only ever issued control calls. It
+removes a failure mode rather than a variable. Details, and what it does add
+to account for on a single-node cluster:
+[docs/in-cluster-runner.md](docs/in-cluster-runner.md).
+
 ### 3. Generate the HTML report
 
 Reporting needs no cluster — it reads the JSON already in `results/`. PyYAML
@@ -1058,6 +1079,11 @@ waf-perf-test/
 │   ├── engine.yaml               # Engine (envsubst)
 │   ├── rulesets/                 # minimal, medium, crs
 │   └── load-profiles/            # request shapes + payloads + README
+├── docker/                       # run the orchestration in-cluster instead
+│   ├── Dockerfile                # UBI9 + oc, helm, python3, the repo
+│   ├── runner.yaml               # namespace, SA, cluster-admin, PVC, idle pod
+│   ├── build-and-deploy.sh       # build on the cluster, deploy the runner
+│   └── run-in-cluster.sh         # drive the quick start inside the pod
 ├── templates/
 │   └── report-template.html      # matrix report template
 ├── testdata/
@@ -1102,6 +1128,7 @@ and coraza-kubernetes-operator v0.5.0+. Prometheus and Grafana are optional.
 | Load profile details | `manifests/load-profiles/README.md` |
 | Agent contract: guardrails and routing | `CLAUDE.md` |
 | Driving this harness as an agent | `.claude/skills/perf-test/SKILL.md` |
+| Running the harness from inside the cluster | `docs/in-cluster-runner.md` |
 | Cluster and Istio setup | [operator `DEVELOPMENT.md`](https://github.com/networking-incubator/coraza-kubernetes-operator/blob/main/DEVELOPMENT.md) |
 | Two-plane split, metric contract | [operator `docs/driver-metrics-contract.md`](https://github.com/networking-incubator/coraza-kubernetes-operator/blob/main/docs/driver-metrics-contract.md) |
 | Controllers, cache server, Istio prerequisites | [operator `docs/content/explanation/architecture.md`](https://github.com/networking-incubator/coraza-kubernetes-operator/blob/main/docs/content/explanation/architecture.md) |

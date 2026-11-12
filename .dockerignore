@@ -1,0 +1,9 @@
+# Keep templates/ and manifests/ — the report generator and setup.sh need them.
+# Only this repo's own noise is excluded.
+.git
+.gitignore
+.idea
+results
+__pycache__
+*.pyc
+.DS_Store
