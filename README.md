@@ -719,6 +719,7 @@ results/**/<scenario>[+<profile>]__<tag>__<ts>.json   (every run directory)
 | `scripts/report.py` | Discovery, aggregation, validity, substitution |
 | `scripts/reportlib.py` | Every HTML fragment and chart |
 | `templates/report-template.html` | Layout, styling, Chart.js wiring |
+| `vendor/chart.umd.js` | Chart.js, inlined into the page so it needs no CDN |
 | `generate-report.py` | Shim that delegates to `scripts/report.py` |
 
 Scenario, load profiles and rulesets all come from the filenames, so the page
@@ -739,8 +740,12 @@ rate by more than 5%, cells resting on fewer than three repeats, metrics files
 that could not be attributed. The same lines are printed on stdout. The page is
 written either way — what it must not do is look complete when it is not.
 
-Chart.js is loaded from a CDN, so the charts need network access to render;
-every number is already in the page.
+The output is a single self-contained file. Styling, page script, the result
+data and Chart.js itself (inlined from `vendor/chart.umd.js` — see
+[vendor/README.md](vendor/README.md)) are all embedded, so the report opens with
+no network access and travels as one attachment. It was a CDN `<script src>`
+before, which failed quietly offline: the tables rendered and only the canvases
+were blank.
 
 ### Reading the numbers
 

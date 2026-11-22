@@ -467,6 +467,32 @@ def cluster_facts(fortio_versions):
 
 
 # ---- render ----------------------------------------------------------------
+def chartjs(base_path):
+    """The vendored Chart.js source, to inline into the page.
+
+    Vendored rather than pulled from a CDN so the report is one file that opens
+    anywhere: an air-gapped cluster, an email attachment, a laptop on a plane.
+    The failure it avoids is not a broken-image icon — the page renders, the
+    tables are right, and only the canvases are blank, which reads as a run that
+    collected no data.
+    """
+    path = base_path / "vendor" / "chart.umd.js"
+    try:
+        src = path.read_text()
+    except OSError as e:
+        raise SystemExit(f"cannot read {path}: {e}\n"
+                         f"   vendor/chart.umd.js ships with the repo; restore it with\n"
+                         f"   curl -fsSLo {path} "
+                         f"https://registry.npmjs.org/chart.js/-/chart.js-4.4.0.tgz "
+                         f"(dist/chart.umd.js)")
+    # An inline <script> ends at the first literal "</script", wherever it sits —
+    # inside a string literal included. 4.4.0 has none; a future bump might.
+    if "</script" in src.lower():
+        raise SystemExit(f"{path} contains a literal '</script' and cannot be inlined "
+                         f"as-is — escape it before bumping the vendored version")
+    return src
+
+
 def build(results_dir, scenario, out_path):
     """Render one scenario — every load profile measured under it — to HTML."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -533,6 +559,9 @@ def build(results_dir, scenario, out_path):
     # valid JSON escape, so the parsed strings are unchanged.
     blob = json.dumps(chart_data).replace("</", "<\\/")
     html = html.replace("/*__DATA__*/null", f"/*__DATA__*/{blob}")
+    # Inlined last, so the field loop above does not walk 200 KB of library for
+    # placeholders it cannot contain.
+    html = html.replace("/*__CHARTJS__*/", chartjs(base_path))
 
     out = os.path.abspath(out_path)
     open(out, "w").write(html)
