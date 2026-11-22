@@ -11,9 +11,10 @@ rather than configured. Runs sharing a cell are MEDIANED across repeats
 If `collect.sh` was used, the matching `metrics__<scenario>__<tag>__<ts>.jsonl`
 files are folded in as per-cell server-side tiles (RPS by outcome, active rule
 count, plugin reloads in-window, cache p99, cache size, workqueue) and as a
-resource table — gateway proxy, backend and operator CPU and memory, each a
-delta against the same cell's `waf-off` baseline, plus CPU throttling as a
-validity signal. The report is the durable per-run artifact: no live
+resource table — the gateway proxy's CPU and memory, a delta against the same
+cell's `waf-off` baseline, plus CPU throttling as a validity signal. Gateway
+only: the other workloads are collected but sit outside the filter, so they are
+in the metrics file rather than the table. The report is the durable per-run artifact: no live
 Grafana/Prometheus needed to view it later or to compare runs across time.
 
 Rendering lives in scripts/reportlib.py and templates/report-template.html.

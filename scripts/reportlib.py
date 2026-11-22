@@ -1521,20 +1521,28 @@ def generate_server_section(results, profiles, configs):
 
 # (key, column label, number format, unit suffix, carries a WAF-off delta)
 #
-# The throttle and load-generator columns carry no delta on purpose. Throttling
-# is a statement about whether the cell is readable at all, and the load
-# generator is not under test — differencing either against the baseline would
-# dress a validity signal up as a cost.
+# The gateway only. The WASM filter runs inside that Envoy, so its CPU and
+# working set are the WAF's resource cost in the same sense the latency delta
+# is; backend, operator and load generator sit outside the filter and their
+# columns invited a comparison that does not hold. Two ways they misled:
+# a backend or operator delta reads as WAF cost when it is mostly scheduling
+# noise against a baseline-sized number, and both are max-over-pods or
+# sum-over-replicas figures that move when the pod set changes — an autoscaled
+# gateway, or an operator restart between baseline and WAF-on, shows up as a
+# resource "cost" with no WAF in it at all.
+#
+# collect.sh still gathers all of them, so the raw series stay in the run's
+# metrics jsonl for anyone who wants to dig. This is the table's editorial
+# line, not a change to what is measured.
+#
+# The throttle column carries no delta on purpose: throttling is a statement
+# about whether the cell is readable at all, and differencing it against the
+# baseline would dress a validity signal up as a cost.
 RESOURCE_COLUMNS = [
     ('gw_cpu_cores', 'Gateway CPU (cores)', '.3f', '', True),
     ('gw_cpu_ms_per_req', 'Gateway CPU-ms/req', '.4f', '', True),
     ('gw_mem_mb', 'Gateway memory (MB)', '.1f', '', True),
     ('gw_throttle_pct', 'Gateway throttled', '.1f', '%', False),
-    ('backend_cpu_cores', 'Backend CPU (cores)', '.3f', '', True),
-    ('backend_mem_mb', 'Backend memory (MB)', '.1f', '', True),
-    ('operator_cpu_cores', 'Operator CPU (cores)', '.4f', '', True),
-    ('operator_mem_mb', 'Operator memory (MB)', '.1f', '', True),
-    ('loadgen_cpu_cores', 'Load gen CPU (cores)', '.3f', '', False),
 ]
 
 
@@ -1565,11 +1573,15 @@ def _resource_cell(srv, delta, key, numfmt, unit, has_delta, is_baseline):
 
 
 def generate_resource_section(results, profiles, configs):
-    """CPU and memory per cell, as a delta against the same profile's WAF off run.
+    """Gateway CPU and memory per cell, as a delta against that profile's WAF off run.
 
     The latency sections say what the WAF cost the client. This says what it
     cost the cluster — the CPU and resident memory of the Envoy the WASM filter
     runs inside, which is the half of the bill a load generator cannot see.
+
+    Gateway only, by RESOURCE_COLUMNS. collect.sh still records the backend,
+    operator and load generator into the run's metrics jsonl; they are just not
+    columns here, because nothing outside the filter makes a WAF cost.
 
     Like latency, only the delta travels: absolute cores and megabytes are
     properties of the node the proxy landed on. <strong>Gateway CPU-ms/req</strong>
@@ -1605,11 +1617,16 @@ def generate_resource_section(results, profiles, configs):
         <section id="resources" class="section">
             <h2 class="section-title">Resource Cost</h2>
             <p class="section-subtitle">
-                Container CPU and working-set memory over each run's window, from cAdvisor via
-                <code>collect.sh</code>, median across repeats. CPU is summed over a workload's
+                The gateway proxy's CPU and working-set memory over each run's window, from
+                cAdvisor via <code>collect.sh</code>, median across repeats. The WASM filter runs
+                inside this Envoy, so this is the WAF's resource cost; the backend, operator and
+                load generator are measured too and kept in the run's metrics file, but they sit
+                outside the filter and are not shown here. CPU is summed over the gateway's
                 replicas; memory is the peak of any one pod. Each figure carries its delta against
                 that load profile's own <code>waf-off</code> run — the absolute values belong to
-                this cluster and do not travel, exactly as with latency.
+                this cluster and do not travel, exactly as with latency. Both aggregates move when
+                the replica set changes, so treat a cell whose gateway autoscaled mid-run as
+                indicative only.
                 <strong>Gateway CPU-ms/req</strong> is the one to compare across profiles: raw
                 cores track the rate a cell actually held, so a cell that missed its target looks
                 cheaper than one that held it. <strong>Gateway throttled</strong> is the share of

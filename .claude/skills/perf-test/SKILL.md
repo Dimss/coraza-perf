@@ -334,8 +334,8 @@ across repeats** per `(profile, ruleset)` cell, computes the delta vs B0
 (`waf-off`) per percentile, folds in the server-side summary from that group's
 `metrics__<group>__<tag>__<ts>.jsonl` (`collect.sh`; files without a group in
 the name are skipped and reported) along with a **Resource Cost** table — the
-gateway proxy's, backend's and operator's CPU and working-set memory, each a
-delta against that cell's own baseline, plus CPU throttling — and writes one
+gateway proxy's CPU and working-set memory, a delta against that cell's own
+baseline, plus CPU throttling — and writes one
 `results/<scenario>-report.html` per scenario — covering every profile measured
 under it. Needs **no cluster** and **no live Grafana/Prometheus**; the charts
 load Chart.js from a CDN. `suite.sh` runs it automatically at the end of a suite.

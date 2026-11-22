@@ -819,7 +819,10 @@ CPU and resident memory of the Envoy that `coraza-proxy-wasm` runs inside. A loa
 generator cannot see it, so `collect.sh` reads it from the kubelet's cAdvisor
 series and the report renders it as a **Resource Cost** table.
 
-Per workload — gateway proxy, backend, operator, load generator:
+Collected per workload — gateway proxy, backend, operator, load generator —
+though only the gateway's figures are columns in the table. The WASM filter runs
+inside that Envoy, so nothing outside it makes a WAF cost; the rest stay in the
+run's `metrics__*.jsonl` for anyone who wants to dig:
 
 - `container_cpu_usage_seconds_total` — rate gives cores, **summed** across a
   workload's replicas, because total cost is what scales with offered load
