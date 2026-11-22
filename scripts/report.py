@@ -88,26 +88,29 @@ def _as_float(v):
 
 # ---- collect.sh metrics jsonl ---------------------------------------------
 def _series(resp):
-    """Yield (labels, [float values]) from a Prometheus query_range response.
+    """Yield (labels, [(timestamp, value)]) from a Prometheus query_range response.
 
     Non-finite samples are dropped. Prometheus serialises NaN and +Inf as the
     strings "NaN"/"+Inf" and float() accepts both, so a ratio query whose
     denominator was zero for part of the window — the CPU throttle ratio while a
     cgroup was idle — would otherwise poison every max() and mean() taken over
     it and render as "nan%" in the report.
+
+    Timestamps are kept, not just values, because a working set has to be read
+    from the end of the window rather than the whole of it. See late_max().
     """
     if not isinstance(resp, dict):
         return
     for s in resp.get("data", {}).get("result", []):
-        vals = []
-        for _, v in s.get("values", []):
+        pts = []
+        for ts, v in s.get("values", []):
             try:
-                f = float(v)
+                t, f = float(ts), float(v)
             except (TypeError, ValueError):
                 continue
             if math.isfinite(f):
-                vals.append(f)
-        yield s.get("metric", {}), vals
+                pts.append((t, f))
+        yield s.get("metric", {}), pts
 
 
 def parse_metrics(path):
@@ -121,11 +124,42 @@ def parse_metrics(path):
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        for labels, vals in _series(obj.get("result", {})):
-            by_name[obj.get("metric", "")].append((labels, vals))
+        for labels, pts in _series(obj.get("result", {})):
+            by_name[obj.get("metric", "")].append((labels, pts))
+
+    def all_pts(name):
+        return [p for _, pts in by_name.get(name, []) for p in pts]
 
     def all_vals(name):
-        return [v for _, vs in by_name.get(name, []) for v in vs]
+        return [v for _, v in all_pts(name)]
+
+    def late_max(name):
+        """Peak over the LAST HALF of the window.
+
+        A working set is stateful, and the gateway pod is not restarted between
+        cells, so the start of a window can still hold the previous ruleset's
+        footprint: withdrawing the WasmPlugin tears the WASM VM down, but the
+        kernel reclaims the pages a good while later — measured at ~60s on a
+        147s window, far outside suite.sh's 25s settle. A plain max() over the
+        window then reports the *previous* cell's peak, and because the suite
+        runs crs last, every waf-off baseline inherited it: the baseline read
+        375 MB where it had settled at 169 MB, and minimal came out 27% *below*
+        a no-WAF baseline. Taking the peak from the second half keeps what max()
+        was for — a VM that grows as it warms up within the run — while dropping
+        the part of the window that belongs to the run before it.
+
+        Not applied to the throttle ratio: there a stale spike makes a cell look
+        invalid when it was fine, which costs a re-measure, whereas missing real
+        throttling costs a wrong number presented as a right one.
+        """
+        pts = all_pts(name)
+        if not pts:
+            return None
+        lo = min(t for t, _ in pts)
+        hi = max(t for t, _ in pts)
+        cutoff = lo + (hi - lo) / 2.0
+        # The sample at hi always clears the cutoff, so this is never empty.
+        return max(v for t, v in pts if t >= cutoff)
 
     srv = {}
     # active rule count — the ruleset actually loaded (max over window)
@@ -160,17 +194,19 @@ def parse_metrics(path):
     # proxy's worst 15s slice — real, but dominated by whichever scrape caught
     # a config push, and not comparable between two runs of different lengths.
     #
-    # Memory is the max: the working set only matters at its peak, since that
-    # is what has to fit under the limit, and it climbs through a run as the
-    # WASM VM warms up rather than sitting at a level a mean would describe.
+    # Memory is the peak of the window's second half: the working set only
+    # matters at its peak, since that is what has to fit under the limit, and it
+    # climbs through a run as the WASM VM warms up rather than sitting at a
+    # level a mean would describe — but the first half can still be the
+    # *previous* cell's footprint waiting to be reclaimed. See late_max().
     for key in ("gw_cpu_cores", "backend_cpu_cores",
                 "loadgen_cpu_cores", "operator_cpu_cores"):
         srv[key] = mean(all_vals(key))
     for key, metric in (("gw_mem_mb", "gw_mem_bytes"),
                         ("backend_mem_mb", "backend_mem_bytes"),
                         ("operator_mem_mb", "operator_mem_bytes")):
-        vals = all_vals(metric)
-        srv[key] = max(vals) / 1e6 if vals else None
+        peak = late_max(metric)
+        srv[key] = peak / 1e6 if peak is not None else None
     # Throttling is a max, not a mean: one throttled slice inside the window is
     # already enough to make that cell's latency partly a story about the CPU
     # limit. Stored as a percentage.

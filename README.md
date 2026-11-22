@@ -826,8 +826,14 @@ run's `metrics__*.jsonl` for anyone who wants to dig:
 
 - `container_cpu_usage_seconds_total` — rate gives cores, **summed** across a
   workload's replicas, because total cost is what scales with offered load
-- `container_memory_working_set_bytes` — **max** over pods, because a working
-  set only matters at its peak and that is what has to fit under the limit.
+- `container_memory_working_set_bytes` — **max** over pods, and over the
+  **second half** of the window, because a working set only matters at its peak
+  and that is what has to fit under the limit. Second half because the first
+  can still hold the *previous* cell's footprint: the gateway pod is not
+  restarted between cells, and withdrawing the WasmPlugin frees the WASM VM
+  long before the kernel reclaims its pages. Taking the whole window made every
+  `waf-off` baseline inherit the `crs` run before it and reported the WAF as
+  *saving* ~90 MB.
   Not `container_memory_usage_bytes`: that counts reclaimable page cache, which
   drifts upward through a session and reads as a WAF memory cost that is really
   file cache

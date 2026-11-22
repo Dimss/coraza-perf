@@ -1622,7 +1622,9 @@ def generate_resource_section(results, profiles, configs):
                 inside this Envoy, so this is the WAF's resource cost; the backend, operator and
                 load generator are measured too and kept in the run's metrics file, but they sit
                 outside the filter and are not shown here. CPU is summed over the gateway's
-                replicas; memory is the peak of any one pod. Each figure carries its delta against
+                replicas; memory is the peak of any one pod over the window's second half, so a
+                cell does not inherit the footprint the run before it had not yet freed. Each
+                figure carries its delta against
                 that load profile's own <code>waf-off</code> run — the absolute values belong to
                 this cluster and do not travel, exactly as with latency. Both aggregates move when
                 the replica set changes, so treat a cell whose gateway autoscaled mid-run as
