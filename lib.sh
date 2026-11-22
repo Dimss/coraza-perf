@@ -86,6 +86,42 @@ PROM_NAMESPACE="${PROM_NAMESPACE:-monitoring}"
 PROM_SVC="${PROM_SVC:-prometheus-k8s}"
 PROM_PORT="${PROM_PORT:-9090}"
 
+# Where the kubelet/cAdvisor container series live (container_cpu_usage_seconds_total,
+# container_memory_working_set_bytes). Defaults to the same Prometheus as above,
+# which is right for a kube-prometheus-stack cluster where one instance scrapes
+# both the kubelet and user workloads. OpenShift splits them: cAdvisor is in the
+# platform instance (prometheus-k8s / openshift-monitoring) while the operator's
+# ServiceMonitor and the Envoy PodMonitor are scraped by user-workload monitoring
+# (prometheus-user-workload / openshift-user-workload-monitoring). Point PROM_* at
+# the one with the coraza_* series and these at the platform one, or the resource
+# tiles come back empty with no error — collect.sh queries each in its own pass.
+PROM_CADVISOR_NAMESPACE="${PROM_CADVISOR_NAMESPACE:-${PROM_NAMESPACE}}"
+PROM_CADVISOR_SVC="${PROM_CADVISOR_SVC:-${PROM_SVC}}"
+PROM_CADVISOR_PORT="${PROM_CADVISOR_PORT:-${PROM_PORT}}"
+
+# Which containers collect.sh samples CPU and memory for. cAdvisor labels a
+# series by pod name, not by workload, so these are regexes: every pod carries a
+# generated ReplicaSet/Job suffix. The gateway's Deployment is the one Istio
+# derives from the Gateway (<gateway>-<class>), and its proxy container is
+# istio-proxy — that is the process coraza-proxy-wasm runs inside, so its CPU and
+# RSS are the WAF's resource cost in the same sense the latency delta is.
+GW_POD_REGEX="${GW_POD_REGEX:-${GATEWAY_SVC}-.*}"
+GW_CONTAINER="${GW_CONTAINER:-istio-proxy}"
+BACKEND_POD_REGEX="${BACKEND_POD_REGEX:-echo-.*}"
+BACKEND_CONTAINER="${BACKEND_CONTAINER:-echo}"
+# The measured load comes from run.sh's Job (perf-run-<epoch>-<rand>), not from
+# the long-lived loadgen Deployment, which only runs the shape probe. Sampling
+# the Deployment would report an idle pod and hide the one case that matters: a
+# load generator pinned at its CPU limit cannot offer the requested rate, which
+# is the usual cause of an ActualQPS shortfall.
+LOADGEN_POD_REGEX="${LOADGEN_POD_REGEX:-perf-run-.*}"
+LOADGEN_CONTAINER="${LOADGEN_CONTAINER:-fortio}"
+# Operator pod: see OPERATOR_POD_REGEX below, next to CORAZA_RELEASE, which it
+# is derived from. Its container filter is empty on purpose — an empty *_CONTAINER
+# means "every container in the pod", which is what we want for the operator,
+# whose container name is the chart's business and has no stable value here.
+OPERATOR_CONTAINER="${OPERATOR_CONTAINER:-}"
+
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-180s}"
 # How long waf.sh waits for the operator to withdraw the WasmPlugin after the
 # Engine is deleted. Separate from WAIT_TIMEOUT because this one gates a
@@ -124,6 +160,10 @@ CORAZA_CHART="${CORAZA_CHART:-coraza-kubernetes-operator/coraza-kubernetes-opera
 CORAZA_CHART_VERSION="${CORAZA_CHART_VERSION:-}"
 CORAZA_NAMESPACE="${CORAZA_NAMESPACE:-coraza-system}"
 CORAZA_RELEASE="${CORAZA_RELEASE:-coraza-kubernetes-operator}"
+# Pod-name regex collect.sh samples the operator's CPU and memory with. Here
+# rather than beside the other *_POD_REGEX vars because it is derived from the
+# release name, which is only known at this point in the file.
+OPERATOR_POD_REGEX="${OPERATOR_POD_REGEX:-${CORAZA_RELEASE}-.*}"
 # Operator image. Empty no longer means "whatever the chart defaults to":
 # install-operator.sh resolves one instead, because the chart's ghcr.io release
 # images are linux/amd64 only — every tag through v0.5.0 is a single-platform

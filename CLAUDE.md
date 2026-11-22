@@ -21,6 +21,7 @@ These are not style preferences. Violating one does not make a run slightly wors
 5. **Repeat at least three times per data point** and report the median with its spread. None of the scripts loop, so this is on you: invoke the suite again. One run is noise.
 6. **Confirm the filter actually ran.** A bypassed WAF produces a fast, clean, meaningless number.
 7. **Prefer p95 and p99. Never headline the average.**
+8. **Treat CPU and memory the same way as latency: delta only, same session.** They are collected with `COLLECT=true` and reported as a delta against that profile's `waf-off` run. Compare `Gateway CPU-ms/req` across profiles, not raw cores — cores track the rate a cell actually held, so a cell that missed its target looks cheaper than one that held it.
 
 ## When to throw a run away
 
@@ -30,6 +31,7 @@ A run is valid only when all of these hold, per [Validity criteria](README.md#va
 - `ActualQPS` is within about 5% of the requested rate.
 - The shape probe returned the profile's `EXPECT_STATUS`.
 - No plugin reload happened inside the measurement window.
+- The gateway proxy was not CPU-throttled inside the window. Only visible with `COLLECT=true`; the report's validity banner raises it. A throttled proxy's p99 is the CFS period it waited out, not the rules — fix the limit and re-measure rather than reporting the cell with a caveat. The same check on the load generator explains an `ActualQPS` shortfall that is the client's fault, not the WAF's.
 
 An `ActualQPS` shortfall is itself a finding — the system could not hold the offered load — but it invalidates the latency comparison for that cell, because the percentiles then describe a lighter workload than the baseline they are compared against.
 
@@ -47,6 +49,8 @@ scripts/waf.sh on <minimal|medium|crs>  # or: off | status
 scripts/suite.sh <scenario-file> [rulesets...]   # canonical: baseline then one run per ruleset
 scripts/run.sh <scenario-file> [tag]  # one measured run with validity probes
 scripts/collect.sh <start> <end> [tag] [scenario]  # pull Prometheus metrics for a window
+                                      # (coraza_* + control plane from PROM_*,
+                                      #  container CPU/memory from PROM_CADVISOR_*)
 scripts/teardown.sh                   # delete the namespace; results are kept
 scripts/prereqs/uninstall-operator.sh # also remove the operator, its RBAC and CRDs
 ```
@@ -78,6 +82,8 @@ python3 scripts/report.py --scenario fixed-500qps   # just that one
 ```
 
 `scripts/report.py` is the only report generator. One page per scenario, covering every load profile measured under it as a profiles × rulesets matrix, every figure the median across that cell's repeats, every WAF cost a delta against that profile's own `waf-off` baseline. It discovers the scenario, the profiles and the rulesets from the filenames under `results/`, searched recursively, so it reports what ran rather than what was configured. Output is `results/<scenario>-report.html`; point `--results` at one run directory to report on that session alone.
+
+With `COLLECT=true` it also renders a Resource Cost table — gateway proxy, backend and operator CPU and working-set memory, each delta'd against the cell's own baseline, plus CPU throttling as a validity signal. That table is absent unless `collect.sh` reached a Prometheus holding the cAdvisor series.
 
 Rendering lives in `scripts/reportlib.py` and `templates/report-template.html`; `generate-report.py` is a shim that delegates, kept so older commands still work. Cluster facts the results cannot carry — `PLATFORM`, `ISTIO_VERSION`, `OPERATOR_VERSION`, `NAMESPACE` — are read from the environment and render as "not recorded" when unset.
 
@@ -111,7 +117,12 @@ no arguments; `scripts/prereqs/check.sh` reports what is missing;
   the gateway class. Set it only to override a correct detection; an override that
   disagrees with the cluster warns rather than fails, since doing it deliberately
   is legitimate.
-- For metrics collection, a reachable Prometheus with the operator's ServiceMonitor and PodMonitor enabled.
+- For metrics collection, a reachable Prometheus with the operator's ServiceMonitor
+  and PodMonitor enabled. The CPU and memory figures come from the kubelet's
+  cAdvisor series instead, which on OpenShift are in a different Prometheus from
+  the `coraza_*` ones — `PROM_CADVISOR_NAMESPACE`/`_SVC` point at it, and
+  `collect.sh` queries the two in separate passes. Wrong, and the resource table
+  is absent rather than wrong.
 - Dedicated node pools and guaranteed QoS for the load generator, Gateway, and backend. Without them you are measuring CPU throttling.
 
 ## Defects that will mislead you

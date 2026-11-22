@@ -10,9 +10,11 @@ rather than configured. Runs sharing a cell are MEDIANED across repeats
 
 If `collect.sh` was used, the matching `metrics__<scenario>__<tag>__<ts>.jsonl`
 files are folded in as per-cell server-side tiles (RPS by outcome, active rule
-count, plugin reloads in-window, cache p99, cache size, workqueue). The report
-is the durable per-run artifact: no live Grafana/Prometheus needed to view it
-later or to compare runs across time.
+count, plugin reloads in-window, cache p99, cache size, workqueue) and as a
+resource table — gateway proxy, backend and operator CPU and memory, each a
+delta against the same cell's `waf-off` baseline, plus CPU throttling as a
+validity signal. The report is the durable per-run artifact: no live
+Grafana/Prometheus needed to view it later or to compare runs across time.
 
 Rendering lives in scripts/reportlib.py and templates/report-template.html.
 
@@ -24,7 +26,7 @@ Cluster facts the results cannot carry are read from the environment when set:
 PLATFORM, ISTIO_VERSION, OPERATOR_VERSION, NAMESPACE. Unset renders as
 "not recorded" — the page never claims a cluster it cannot prove.
 """
-import argparse, glob, json, os, pathlib, re, statistics, datetime, collections, sys
+import argparse, glob, json, math, os, pathlib, re, statistics, datetime, collections, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reportlib
@@ -85,16 +87,25 @@ def _as_float(v):
 
 # ---- collect.sh metrics jsonl ---------------------------------------------
 def _series(resp):
-    """Yield (labels, [float values]) from a Prometheus query_range response."""
+    """Yield (labels, [float values]) from a Prometheus query_range response.
+
+    Non-finite samples are dropped. Prometheus serialises NaN and +Inf as the
+    strings "NaN"/"+Inf" and float() accepts both, so a ratio query whose
+    denominator was zero for part of the window — the CPU throttle ratio while a
+    cgroup was idle — would otherwise poison every max() and mean() taken over
+    it and render as "nan%" in the report.
+    """
     if not isinstance(resp, dict):
         return
     for s in resp.get("data", {}).get("result", []):
         vals = []
         for _, v in s.get("values", []):
             try:
-                vals.append(float(v))
+                f = float(v)
             except (TypeError, ValueError):
-                pass
+                continue
+            if math.isfinite(f):
+                vals.append(f)
         yield s.get("metric", {}), vals
 
 
@@ -141,6 +152,32 @@ def parse_metrics(path):
     srv["workqueue_max"] = max(wq) if wq else None
     an = all_vals("waf_anomaly_p95")
     srv["anomaly_p95"] = mean(an)
+
+    # --- container resources (cAdvisor) -------------------------------------
+    # CPU is the mean over the window: the steady-state cost of serving the
+    # load, which is what differences against the baseline. A max would be the
+    # proxy's worst 15s slice — real, but dominated by whichever scrape caught
+    # a config push, and not comparable between two runs of different lengths.
+    #
+    # Memory is the max: the working set only matters at its peak, since that
+    # is what has to fit under the limit, and it climbs through a run as the
+    # WASM VM warms up rather than sitting at a level a mean would describe.
+    for key in ("gw_cpu_cores", "backend_cpu_cores",
+                "loadgen_cpu_cores", "operator_cpu_cores"):
+        srv[key] = mean(all_vals(key))
+    for key, metric in (("gw_mem_mb", "gw_mem_bytes"),
+                        ("backend_mem_mb", "backend_mem_bytes"),
+                        ("operator_mem_mb", "operator_mem_bytes")):
+        vals = all_vals(metric)
+        srv[key] = max(vals) / 1e6 if vals else None
+    # Throttling is a max, not a mean: one throttled slice inside the window is
+    # already enough to make that cell's latency partly a story about the CPU
+    # limit. Stored as a percentage.
+    for key, metric in (("gw_throttle_pct", "gw_cpu_throttle_ratio"),
+                        ("loadgen_throttle_pct", "loadgen_cpu_throttle_ratio")):
+        vals = all_vals(metric)
+        srv[key] = max(vals) * 100.0 if vals else None
+
     return srv if any(v is not None for v in srv.values()) else None
 
 
@@ -274,15 +311,61 @@ def aggregate(results_dir, group):
             "server": _median_server(srv_list) if srv_list else None,
         })
 
+    for m in modes:
+        _add_cpu_per_request(m)
+
     base = next((m for m in modes if m["mode"] == BASELINE_TAG), None)
     for m in modes:
         if base and m["mode"] != BASELINE_TAG:
             m["delta"] = {p: (m["pcts"][p] - base["pcts"][p])
                           if (m["pcts"][p] is not None and base["pcts"][p] is not None) else None
                           for p in PCTS}
+            m["server_delta"] = _server_delta(m["server"], base["server"])
         else:
             m["delta"] = {p: None for p in PCTS}
+            m["server_delta"] = None
     return modes, legacy_metrics
+
+
+# Resource figures that carry a WAF-off delta. Throttle percentages are
+# deliberately absent: they are a validity signal about the cell, not a cost
+# that subtracts, and "+3pp throttled" invites reading the limit as WAF overhead.
+RESOURCE_DELTA_KEYS = (
+    "gw_cpu_cores", "gw_cpu_ms_per_req", "gw_mem_mb",
+    "backend_cpu_cores", "backend_mem_mb",
+    "operator_cpu_cores", "operator_mem_mb",
+)
+
+
+def _add_cpu_per_request(mode):
+    """CPU-milliseconds of gateway proxy per request served.
+
+    The load-independent form of the CPU cost, and the only one that compares
+    across profiles: cores is CPU-seconds per second, so cores/QPS is
+    CPU-seconds per request. Absolute cores tracks the offered rate, so a cell
+    that failed to hold its rate looks cheaper than one that held it — exactly
+    backwards. This figure does not, which is why it is the one to headline.
+    """
+    srv = mode.get("server")
+    if not srv:
+        return
+    cores, qps = srv.get("gw_cpu_cores"), mode.get("qps")
+    srv["gw_cpu_ms_per_req"] = (cores / qps * 1000.0) if (cores is not None and qps) else None
+
+
+def _server_delta(srv, base_srv):
+    """Resource cost against the same-session WAF-off baseline, per key.
+
+    Absolute CPU and memory are properties of the cluster and do not travel,
+    the same way absolute latency does not. Only the delta is reportable.
+    """
+    if not srv or not base_srv:
+        return None
+    out = {}
+    for k in RESOURCE_DELTA_KEYS:
+        a, b = srv.get(k), base_srv.get(k)
+        out[k] = (a - b) if (a is not None and b is not None) else None
+    return out if any(v is not None for v in out.values()) else None
 
 
 def off_target(actual, requested):
@@ -330,6 +413,7 @@ def build_cells(results_dir, scenario):
                 "delta": m["delta"],
                 "off_target": off_target(m["qps"], m["requested_qps"]),
                 "server": m["server"],
+                "server_delta": m["server_delta"],
                 "conn": m["conn"],
             }
             if m.get("fortio"):
@@ -514,6 +598,7 @@ def build(results_dir, scenario, out_path):
         "__VALIDITY_BANNER__": reportlib.generate_validity_banner(
             scenario, profiles, configs, cells, data["legacy_metrics"]),
         "__SERVER_SECTION__": reportlib.generate_server_section(cells, profiles, configs),
+        "__RESOURCE_SECTION__": reportlib.generate_resource_section(cells, profiles, configs),
         "__RULE_COUNT_LIST__": count_list(configs),
         "__WAF_RULE_COUNT_LIST__": count_list([c for c in configs if c != "off"]),
         "__TARGET_QPS__": ("unthrottled" if qps == "0" else f"{qps} req/s") if qps else "unknown",

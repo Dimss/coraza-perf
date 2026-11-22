@@ -867,6 +867,9 @@
                 <li class="navbar-item" id="nav-server" style="display:none">
                     <a class="navbar-link" data-section="server">Server-side</a>
                 </li>
+                <li class="navbar-item" id="nav-resources" style="display:none">
+                    <a class="navbar-link" data-section="resources">Resource Cost</a>
+                </li>
                 <li class="navbar-item">
                     <a class="navbar-link" data-section="findings">Key Findings</a>
                 </li>
@@ -1101,6 +1104,8 @@
 
         __SERVER_SECTION__
 
+        __RESOURCE_SECTION__
+
         <!-- Findings Section -->
         <section id="findings" class="section">
             <h2 class="section-title">Key Findings</h2>
@@ -1132,9 +1137,13 @@
         // Data injected by generator
         const DATA = /*__DATA__*/null;
 
-        // The server-side section exists only when collect.sh was used.
+        // The server-side section exists only when collect.sh was used, and the
+        // resource section only when it also reached the cAdvisor series.
         if (document.getElementById('server')) {
             document.getElementById('nav-server').style.display = '';
+        }
+        if (document.getElementById('resources')) {
+            document.getElementById('nav-resources').style.display = '';
         }
 
         // Navigation
