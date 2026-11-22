@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Coraza WAF Performance Test Results</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- Chart.js is inlined by scripts/report.py from vendor/, not fetched from a
+         CDN: a report is read from a laptop, an air-gapped cluster or a PR
+         attachment, and a chartless page there looks like a run with no data. -->
+    <script>/*__CHARTJS__*/</script>
     <style>
         * {
             margin: 0;

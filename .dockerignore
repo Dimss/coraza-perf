@@ -1,4 +1,5 @@
-# Keep templates/ and manifests/ — the report generator and setup.sh need them.
+# Keep templates/, vendor/ and manifests/ — the report generator inlines the
+# first two into its output, and setup.sh needs the third.
 # Only this repo's own noise is excluded.
 .git
 .gitignore
