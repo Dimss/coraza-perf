@@ -337,9 +337,14 @@ commit, and a report needs all three. Every other knob has a default in
 - Kubernetes **v1.32+** or OpenShift **v4.20+** in the first place
 - Local tools: `kubectl` (or `oc`), `envsubst`, `python3`, `curl`; plus `helm`,
   and `istioctl` on Kubernetes
-- Optional: Prometheus with retention ≥1h at ≤15s scrape interval
+- Optional: Prometheus with retention ≥1h at ≤15s scrape interval, scraping both
+  the operator's ServiceMonitor / Envoy's PodMonitor and the kubelet's cAdvisor
+  endpoint — the latter is what the CPU and memory figures come from, and on
+  OpenShift it is a different Prometheus. See [Resources](#resources).
 
-Without the first two you are measuring CPU throttling, and no script can tell.
+Without the first two you are measuring CPU throttling. With the Prometheus, a
+script finally can tell you: the report's throttle column is non-zero and the
+validity banner says so. Without it, nothing can.
 
 `scripts/prereqs/check.sh` reports what is still missing.
 [docs/prerequisites.md](docs/prerequisites.md) has the per-platform detail and
@@ -573,6 +578,12 @@ window says which run it belongs to. Omit it and the file is still written, but
 `report.py` skips it rather than attribute another scenario's server-side
 numbers to the one being reported.
 
+Two passes run per window: the `coraza_*` and controller-runtime queries against
+`PROM_*`, then the container CPU and memory queries against `PROM_CADVISOR_*`
+(the same Prometheus unless you say otherwise). If the resource figures come
+back empty, that split is the first thing to check — see
+[Resources](#resources).
+
 ### Tear down
 
 ```bash
@@ -633,12 +644,21 @@ A run is valid when:
 - `ActualQPS` is within ~5% of the requested rate
 - The shape probe returned `EXPECT_STATUS`
 - No plugin reload occurred inside the window
+- The gateway proxy was not CPU-throttled inside the window (only visible when
+  `COLLECT=true`; see [Resources](#resources))
 
 **An `ActualQPS` shortfall is itself a result** — it means the system could not
 sustain the offered load — but it invalidates the *latency* comparison for that
 cell, because the percentiles then describe a different, lighter workload than
 the baseline they are compared against. Report it as a throughput finding and
-re-run the latency cell at a rate the system can hold.
+re-run the latency cell at a rate the system can hold. Check the load
+generator's throttle figure first: a client pinned at `LOADGEN_CPU_LIMIT`
+produces the same shortfall and is not a finding about the WAF at all.
+
+**Throttling makes a cell unreadable rather than merely worse.** A throttled
+proxy's p99 is the CFS period it waited out, not the time the rules took, and
+raising the limit changes the number without changing the WAF. Fix the limit and
+re-measure; do not report the cell with a caveat.
 
 ---
 
@@ -730,14 +750,16 @@ generated from the data rather than written by hand.
 Sections: Architecture, Scenario, Profiles, WAF Rulesets, Test Matrix,
 Performance Results (7 charts: latency by profile, WAF overhead, latency
 distribution, complexity impact, rules efficiency, tail-latency ratio, p95
-heatmap), Server-side Summary (only when `collect.sh` metrics exist), and
-Findings.
+heatmap), Server-side Summary and Resource Cost (both only when `collect.sh`
+metrics exist, the latter also needing the cAdvisor series — see
+[Resources](#resources)), and Findings.
 
 A banner at the top of the page states anything that makes the report
 unreportable: a profile with no `waf-off` run, a cell that missed its offered
-rate by more than 5%, cells resting on fewer than three repeats, metrics files
-that could not be attributed. The same lines are printed on stdout. The page is
-written either way — what it must not do is look complete when it is not.
+rate by more than 5%, cells resting on fewer than three repeats, a
+CPU-throttled gateway or load generator, metrics files that could not be
+attributed. The same lines are printed on stdout. The page is written either
+way — what it must not do is look complete when it is not.
 
 Chart.js is loaded from a CDN, so the charts need network access to render;
 every number is already in the page.
@@ -787,8 +809,46 @@ status-code distribution, request count.
 
 ### Resources
 
-Gateway pods (Envoy + WASM), operator pod, backend pods — CPU, memory, WASM heap
-size, and CPU throttle counters.
+Latency is half the bill. The other half is what the WAF costs the cluster: the
+CPU and resident memory of the Envoy that `coraza-proxy-wasm` runs inside. A load
+generator cannot see it, so `collect.sh` reads it from the kubelet's cAdvisor
+series and the report renders it as a **Resource Cost** table.
+
+Per workload — gateway proxy, backend, operator, load generator:
+
+- `container_cpu_usage_seconds_total` — rate gives cores, **summed** across a
+  workload's replicas, because total cost is what scales with offered load
+- `container_memory_working_set_bytes` — **max** over pods, because a working
+  set only matters at its peak and that is what has to fit under the limit.
+  Not `container_memory_usage_bytes`: that counts reclaimable page cache, which
+  drifts upward through a session and reads as a WAF memory cost that is really
+  file cache
+- `container_cpu_cfs_throttled_periods_total` / `..._cfs_periods_total` — the
+  share of scheduling periods the cgroup was held off the CPU (gateway and load
+  generator only)
+
+Every figure carries a delta against the same load profile's `waf-off` run, for
+the same reason latency does: absolute cores and megabytes describe the node the
+pod landed on and do not travel.
+
+**Compare `Gateway CPU-ms/req`, not raw cores.** Cores is CPU-seconds per second,
+so cores ÷ actual QPS is CPU-seconds per request — the load-independent form.
+Raw cores track the rate a cell actually held, so a cell that missed its target
+looks *cheaper* than one that held it, which is backwards.
+
+Two cluster facts to get right or the table comes back empty:
+
+- **cAdvisor may be in a different Prometheus from `coraza_*`.** On OpenShift it
+  is: the kubelet is scraped by the platform instance (`prometheus-k8s` in
+  `openshift-monitoring`) while the operator's ServiceMonitor and the Envoy
+  PodMonitor are scraped by user-workload monitoring. Point `PROM_*` at the one
+  with `coraza_*` and `PROM_CADVISOR_*` at the platform one; `collect.sh` queries
+  each in its own pass. On a kube-prometheus-stack cluster one instance has both
+  and the defaults are already right.
+- **Resource numbers are only meaningful under guaranteed QoS on dedicated
+  nodes.** Without them the gateway's CPU is whatever it could win from its
+  neighbours. Non-zero throttling says so directly, and the report raises it in
+  the validity banner.
 
 ---
 
@@ -857,7 +917,12 @@ Environment variables; defaults in `lib.sh`.
 | `CORAZA_IMAGE_REPO` / `CORAZA_IMAGE_TAG` | chart default | Operator image; override for a locally built one |
 | `CORAZA_CRD_DIR` | chart's `crds/` | CRD source. Set it to `<operator-checkout>/config/crd/bases` whenever `CORAZA_IMAGE_REPO` is set — image and CRDs must come from the same revision |
 | `RESULTS_DIR` | `./results` | Where results are written |
-| `PROM_NAMESPACE` / `PROM_SVC` / `PROM_PORT` | `monitoring` / `prometheus-k8s` / `9090` | Prometheus location |
+| `PROM_NAMESPACE` / `PROM_SVC` / `PROM_PORT` | `monitoring` / `prometheus-k8s` / `9090` | Prometheus holding the `coraza_*` series |
+| `PROM_CADVISOR_NAMESPACE` / `PROM_CADVISOR_SVC` / `PROM_CADVISOR_PORT` | same as `PROM_*` | Prometheus holding the kubelet/cAdvisor container series. Separate on OpenShift — see [Resources](#resources) |
+| `GW_POD_REGEX` / `GW_CONTAINER` | `<gateway>-<class>-.*` / `istio-proxy` | Which container's CPU and memory are the WAF's cost |
+| `BACKEND_POD_REGEX` / `BACKEND_CONTAINER` | `echo-.*` / `echo` | Backend containers to sample |
+| `LOADGEN_POD_REGEX` / `LOADGEN_CONTAINER` | `perf-run-.*` / `fortio` | Load generator containers to sample (the measured-run Job, not the probe Deployment) |
+| `OPERATOR_POD_REGEX` / `OPERATOR_CONTAINER` | `<release>-.*` / all containers | Operator containers to sample |
 
 Scenario files set `QPS`, `DURATION`, and `CONNS`. Profiles set `METHOD`,
 `REQ_PATH`, `CONTENT_TYPE`, `PAYLOAD_FILE`, `PAYLOAD`, `PAYLOAD_SIZE`,

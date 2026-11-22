@@ -34,6 +34,12 @@ FALLBACK_RULE_COUNTS = {'off': 0, 'minimal': 1, 'medium': 30, 'crs': 563}
 
 BASELINE_CONFIG = 'off'
 
+# Share of CFS periods throttled, above which a cell is called out in the
+# validity banner. Not zero: cAdvisor's throttle counters pick up a fraction of
+# a percent on an otherwise idle cgroup from scheduling noise alone, and a
+# banner that fires on every run is one nobody reads.
+THROTTLE_PCT_LIMIT = 1.0
+
 # Cycled when a profile or ruleset is not one of the curated ones below, so a
 # report of profiles nobody anticipated still renders.
 PROFILE_PALETTE = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4']
@@ -1413,6 +1419,30 @@ def generate_validity_banner(scenario, profiles, configs, results, legacy_metric
             f'One run is noise; the median needs repeats. Re-run the suite and regenerate — '
             f'results accumulate, so the medians widen as you go.</li>')
 
+    # CPU throttling makes a cell's latency partly a story about the cgroup
+    # limit rather than the WAF, and on the load generator it caps the rate the
+    # client could offer at all. Both are invisible in the fortio JSON, so
+    # before collect.sh sampled cAdvisor there was nothing to say here.
+    throttled = [(p, c, (results[(p, c)].get('server') or {}).get('gw_throttle_pct'))
+                 for (p, c), d in results.items()
+                 if ((d.get('server') or {}).get('gw_throttle_pct') or 0) > THROTTLE_PCT_LIMIT]
+    if throttled:
+        named = ', '.join(f'{profile_title(p)}/{c} ({v:.1f}%)' for p, c, v in sorted(throttled))
+        problems.append(
+            f'<li><strong>Gateway proxy was CPU-throttled:</strong> {named}. Those percentiles '
+            f'are partly the CPU limit, not the WAF. Give the gateway more CPU — or guaranteed '
+            f'QoS on a dedicated node — and re-measure.</li>')
+
+    lg_throttled = [(p, c, (results[(p, c)].get('server') or {}).get('loadgen_throttle_pct'))
+                    for (p, c), d in results.items()
+                    if ((d.get('server') or {}).get('loadgen_throttle_pct') or 0) > THROTTLE_PCT_LIMIT]
+    if lg_throttled:
+        named = ', '.join(f'{profile_title(p)}/{c} ({v:.1f}%)' for p, c, v in sorted(lg_throttled))
+        problems.append(
+            f'<li><strong>Load generator was CPU-throttled:</strong> {named}. The client, not the '
+            f'system under test, capped the offered rate; raise <code>LOADGEN_CPU_LIMIT</code> '
+            f'and re-measure before reading any shortfall as a finding.</li>')
+
     if legacy_metrics:
         problems.append(
             f'<li><strong>{legacy_metrics} metrics file(s) skipped.</strong> They predate '
@@ -1477,6 +1507,114 @@ def generate_server_section(results, profiles, configs):
                 Pulled from Prometheus by <code>collect.sh</code> for each run's window, median
                 across repeats. <strong>Rules loaded</strong> confirms the ruleset under test was
                 the one in force; <strong>reloads in window</strong> must be 0 for a valid run.
+            </p>
+            <table>
+                <thead>
+                    <tr><th>Load Profile</th><th>WAF Config</th>{head}</tr>
+                </thead>
+                <tbody>{''.join(rows)}
+                </tbody>
+            </table>
+        </section>
+'''
+
+
+# (key, column label, number format, unit suffix, carries a WAF-off delta)
+#
+# The throttle and load-generator columns carry no delta on purpose. Throttling
+# is a statement about whether the cell is readable at all, and the load
+# generator is not under test — differencing either against the baseline would
+# dress a validity signal up as a cost.
+RESOURCE_COLUMNS = [
+    ('gw_cpu_cores', 'Gateway CPU (cores)', '.3f', '', True),
+    ('gw_cpu_ms_per_req', 'Gateway CPU-ms/req', '.4f', '', True),
+    ('gw_mem_mb', 'Gateway memory (MB)', '.1f', '', True),
+    ('gw_throttle_pct', 'Gateway throttled', '.1f', '%', False),
+    ('backend_cpu_cores', 'Backend CPU (cores)', '.3f', '', True),
+    ('backend_mem_mb', 'Backend memory (MB)', '.1f', '', True),
+    ('operator_cpu_cores', 'Operator CPU (cores)', '.4f', '', True),
+    ('operator_mem_mb', 'Operator memory (MB)', '.1f', '', True),
+    ('loadgen_cpu_cores', 'Load gen CPU (cores)', '.3f', '', False),
+]
+
+
+def _resource_cell(srv, delta, key, numfmt, unit, has_delta, is_baseline):
+    """One figure, with its delta against this profile's WAF-off run beneath."""
+    value = srv.get(key)
+    if value is None:
+        return '<td>—</td>'
+    shown = f'{value:{numfmt}}{unit}'
+    if not has_delta:
+        return f'<td>{shown}</td>'
+    if is_baseline:
+        return f'<td>{shown}<div class="config-overhead baseline">baseline</div></td>'
+    d = (delta or {}).get(key)
+    if d is None:
+        return f'<td>{shown}</td>'
+    # Severity on the relative change, not the absolute: +0.3 cores is the whole
+    # story on a proxy that drew 0.2 and noise on one that drew 4.
+    base = value - d
+    pct = (d / base * 100.0) if base else None
+    if pct is None:
+        level, trailer = 'medium', ''
+    else:
+        level = 'low' if pct < 5 else ('medium' if pct < 25 else 'high')
+        trailer = f' ({pct:+.0f}%)'
+    return (f'<td>{shown}<div class="config-overhead {level}">'
+            f'{d:+{numfmt}}{unit}{trailer}</div></td>')
+
+
+def generate_resource_section(results, profiles, configs):
+    """CPU and memory per cell, as a delta against the same profile's WAF off run.
+
+    The latency sections say what the WAF cost the client. This says what it
+    cost the cluster — the CPU and resident memory of the Envoy the WASM filter
+    runs inside, which is the half of the bill a load generator cannot see.
+
+    Like latency, only the delta travels: absolute cores and megabytes are
+    properties of the node the proxy landed on. <strong>Gateway CPU-ms/req</strong>
+    is the figure to compare across profiles, since raw cores scale with the
+    rate each cell actually held.
+
+    Empty unless collect.sh reached a Prometheus holding the cAdvisor series.
+    """
+    rows = []
+    for profile in profiles:
+        for config in configs:
+            cell = results.get((profile, config)) or {}
+            srv = cell.get('server')
+            if not srv or not any(srv.get(k) is not None for k, _, _, _, _ in RESOURCE_COLUMNS):
+                continue
+            is_baseline = config == BASELINE_CONFIG
+            tds = ''.join(
+                _resource_cell(srv, cell.get('server_delta'), key, numfmt, unit,
+                               has_delta, is_baseline)
+                for key, _, numfmt, unit, has_delta in RESOURCE_COLUMNS)
+            rows.append(f'''
+                        <tr>
+                            <td class="metric">{profile_title(profile)}</td>
+                            <td class="metric">{config}</td>
+                            {tds}
+                        </tr>''')
+
+    if not rows:
+        return ''
+
+    head = ''.join(f'<th>{label}</th>' for _, label, _, _, _ in RESOURCE_COLUMNS)
+    return f'''
+        <section id="resources" class="section">
+            <h2 class="section-title">Resource Cost</h2>
+            <p class="section-subtitle">
+                Container CPU and working-set memory over each run's window, from cAdvisor via
+                <code>collect.sh</code>, median across repeats. CPU is summed over a workload's
+                replicas; memory is the peak of any one pod. Each figure carries its delta against
+                that load profile's own <code>waf-off</code> run — the absolute values belong to
+                this cluster and do not travel, exactly as with latency.
+                <strong>Gateway CPU-ms/req</strong> is the one to compare across profiles: raw
+                cores track the rate a cell actually held, so a cell that missed its target looks
+                cheaper than one that held it. <strong>Gateway throttled</strong> is the share of
+                CFS periods the proxy was held off the CPU; above zero, that row's latency is
+                partly the limit rather than the WAF.
             </p>
             <table>
                 <thead>

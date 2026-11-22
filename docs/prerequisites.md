@@ -24,6 +24,7 @@ re-runnable — each step is a no-op when its piece is already there.
 | `WasmPlugin` CRD (`extensions.istio.io`) | How `coraza-proxy-wasm` reaches that Envoy |
 | Coraza Kubernetes Operator | Owns `Engine`/`RuleSet`/`RuleSource`, which `waf.sh` toggles |
 | `ServiceMonitor` CRD | Optional. Only `scripts/collect.sh` uses it |
+| kubelet/cAdvisor scraped into Prometheus | Optional. Where `collect.sh` gets the CPU and memory figures. Usually already there — it is what `kubectl top` and every cluster dashboard reads |
 
 `setup.sh` checks none of this. It applies the Gateway and waits for a
 `Programmed` condition that, without a GatewayClass, never arrives — so a
@@ -321,7 +322,11 @@ rather than the WAF:
 - **Dedicated node pools** for the load generator, the Gateway, and the backend.
 - **Guaranteed QoS** — CPU requests equal to limits — on all three.
 - **Prometheus** reachable, with the operator's ServiceMonitor and PodMonitor
-  enabled, if you want `collect.sh` to return anything.
+  enabled, if you want `collect.sh` to return anything. For the CPU and memory
+  figures it also needs the kubelet's cAdvisor series, which on OpenShift live
+  in the *platform* Prometheus (`prometheus-k8s` in `openshift-monitoring`)
+  rather than the user-workload one that scrapes the operator — set
+  `PROM_CADVISOR_NAMESPACE` and `PROM_CADVISOR_SVC` when the two differ.
 
 See [Environment requirements](../README.md#environment-requirements) and
 [Confounders and risks](../README.md#confounders-and-risks).

@@ -36,6 +36,12 @@ root themselves, so they can be invoked by path from anywhere.
   chart (`charts/coraza-kubernetes-operator` in that repo) and are **disabled by
   default** — install it with `metrics.serviceMonitor.enabled=true` and
   `metrics.podMonitor.enabled=true`, or skip the metrics mode.
+- For the CPU/memory figures: the kubelet's cAdvisor series must be in a
+  Prometheus too. On OpenShift that is the **platform** instance
+  (`prometheus-k8s` / `openshift-monitoring`), not the user-workload one holding
+  `coraza_*` — set `PROM_CADVISOR_NAMESPACE` and `PROM_CADVISOR_SVC` to it.
+  `collect.sh` queries the two in separate passes; get it wrong and the Resource
+  Cost table is absent rather than wrong.
 
 If the user hasn't provisioned the target yet, run **setup** before any run.
 
@@ -241,11 +247,19 @@ README → *Methodology* explains why each rule exists; these are the numbers.
    `attack-*` profiles, where 403 is expected and counted separately as
    `blocked_pct`), `ActualQPS` is within ~5% of the requested rate, the shape
    probe returned `EXPECT_STATUS`, and no plugin reload occurred inside the
-   window. Also discard runs with node CPU throttling. An `ActualQPS` shortfall
-   is itself a throughput result — report it as one, and re-run the latency cell
-   at a rate the system can hold.
+   window. Also discard runs with CPU throttling: with `COLLECT=true` the report
+   names the throttled cells in its validity banner, and a throttled proxy's p99
+   is the CFS period it waited out, not the rules. An `ActualQPS` shortfall is
+   itself a throughput result — report it as one, and re-run the latency cell at
+   a rate the system can hold, *after* checking the load generator's own throttle
+   figure, since a client pinned at `LOADGEN_CPU_LIMIT` produces the same
+   shortfall and says nothing about the WAF.
 8. **Report the gap correctly** (see Analyze): per percentile, like-for-like,
    `added pN = pN(WAF on) − pN(WAF off)`, in **ms** and **% = (on−off)/off**.
+   CPU and memory work the same way — delta against the same session's B0, never
+   an absolute. Across profiles compare **`Gateway CPU-ms/req`**, not raw cores:
+   cores track the rate a cell actually held, so a cell that missed its target
+   looks cheaper than one that held it.
 9. **Trust a gap only when it exceeds run-to-run variance.** A delta smaller
    than the WAF-off spread is noise, not signal.
 
@@ -319,7 +333,9 @@ the scenario, load profiles and rulesets from the filenames, takes the **median
 across repeats** per `(profile, ruleset)` cell, computes the delta vs B0
 (`waf-off`) per percentile, folds in the server-side summary from that group's
 `metrics__<group>__<tag>__<ts>.jsonl` (`collect.sh`; files without a group in
-the name are skipped and reported), and writes one
+the name are skipped and reported) along with a **Resource Cost** table — the
+gateway proxy's, backend's and operator's CPU and working-set memory, each a
+delta against that cell's own baseline, plus CPU throttling — and writes one
 `results/<scenario>-report.html` per scenario — covering every profile measured
 under it. Needs **no cluster** and **no live Grafana/Prometheus**; the charts
 load Chart.js from a CDN. `suite.sh` runs it automatically at the end of a suite.
@@ -360,7 +376,8 @@ without the HTML:
 | `WARMUP` | `10s` | Discarded warm-up per run |
 | `SETTLE` | `25s` | Post-toggle wait for WASM poll (suite.sh) |
 | `COLLECT` | `false` | suite.sh also pulls Prometheus metrics |
-| `PROM_NAMESPACE`/`PROM_SVC`/`PROM_PORT` | `monitoring`/`prometheus-k8s`/`9090` | Prometheus location |
+| `PROM_NAMESPACE`/`PROM_SVC`/`PROM_PORT` | `monitoring`/`prometheus-k8s`/`9090` | Prometheus holding `coraza_*` |
+| `PROM_CADVISOR_NAMESPACE`/`PROM_CADVISOR_SVC`/`PROM_CADVISOR_PORT` | same as `PROM_*` | Prometheus holding the cAdvisor container series |
 
 Full table, including `POLL_CACHE`, `EXPECT_*`, `TARGET_URL` and
 `LOADGEN_IMAGE`: README → *Configuration knobs*.
